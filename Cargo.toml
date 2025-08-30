@@ -2,7 +2,7 @@
 name = "tlq-client"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Nebojsa Jakovljevic <nebojsa@skyak.tech>"]
 description = "Rust client for TLQ (Tiny Little Queue) message queue server"
 repository = "https://github.com/skyaktech/tlq-client-rust"
 homepage = "https://github.com/skyaktech/tlq-client-rust"
