@@ -1,33 +1,135 @@
 use thiserror::Error;
 
+/// Comprehensive error type for TLQ client operations.
+///
+/// This enum covers all possible error conditions that can occur when interacting
+/// with a TLQ server, including network issues, server errors, validation failures,
+/// and client-side problems. Errors are classified as either retryable or non-retryable
+/// using the [`is_retryable`](Self::is_retryable) method.
+///
+/// # Error Categories
+///
+/// **Retryable errors** (transient issues that may succeed on retry):
+/// - [`Connection`](Self::Connection) - Network connectivity problems
+/// - [`Timeout`](Self::Timeout) - Request timeouts
+/// - [`Io`](Self::Io) - I/O errors from the underlying transport
+///
+/// **Non-retryable errors** (permanent failures that won't succeed on retry):
+/// - [`Server`](Self::Server) - HTTP 4xx/5xx responses from the server
+/// - [`Validation`](Self::Validation) - Invalid request parameters
+/// - [`Serialization`](Self::Serialization) - JSON parsing errors
+/// - [`MaxRetriesExceeded`](Self::MaxRetriesExceeded) - Retry limit reached
+/// - [`MessageTooLarge`](Self::MessageTooLarge) - Message exceeds size limit
+///
+/// # Examples
+///
+/// ```no_run
+/// use tlq_client::{TlqClient, TlqError};
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let client = TlqClient::new("localhost", 1337).unwrap();
+///     
+///     match client.add_message("test").await {
+///         Ok(message) => println!("Success: {}", message.id),
+///         Err(TlqError::MessageTooLarge { size }) => {
+///             println!("Message too large: {} bytes", size);
+///         },
+///         Err(TlqError::Connection(msg)) => {
+///             println!("Connection failed: {}", msg);
+///         },
+///         Err(e) => println!("Other error: {}", e),
+///     }
+/// }
+/// ```
 #[derive(Error, Debug)]
 pub enum TlqError {
+    /// Network connection error
+    ///
+    /// Indicates problems connecting to the TLQ server, such as connection
+    /// refused, network unreachable, or DNS resolution failures.
     #[error("Connection error: {0}")]
     Connection(String),
 
+    /// Request timeout error
+    ///
+    /// The operation exceeded the configured timeout period. The timeout
+    /// duration is specified in milliseconds.
     #[error("Timeout error after {0}ms")]
     Timeout(u64),
 
+    /// HTTP server error response
+    ///
+    /// The TLQ server returned an HTTP error status code (4xx or 5xx).
+    /// Includes both the status code and any error message from the server.
     #[error("Server error: {status} - {message}")]
     Server { status: u16, message: String },
 
+    /// Request validation error
+    ///
+    /// Invalid parameters were provided to a client method, such as
+    /// empty message ID arrays or zero message counts.
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// JSON serialization/deserialization error
+    ///
+    /// Failed to parse JSON responses from the server or serialize
+    /// request data to JSON.
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// I/O error from underlying transport
+    ///
+    /// Low-level I/O errors from TCP socket operations, such as
+    /// connection reset, broken pipe, or permission denied.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Maximum retry attempts exceeded
+    ///
+    /// The operation was retried the maximum number of times but still failed.
+    /// The retry count is configurable via [`ConfigBuilder`](crate::ConfigBuilder).
     #[error("Max retries exceeded ({max_retries}) for operation")]
     MaxRetriesExceeded { max_retries: u32 },
 
+    /// Message size exceeds the 64KB limit
+    ///
+    /// TLQ enforces a maximum message size of 65,536 bytes (64KB).
+    /// Messages larger than this limit are rejected.
     #[error("Message too large: {size} bytes (max: 65536)")]
     MessageTooLarge { size: usize },
 }
 
 impl TlqError {
+    /// Determines if this error type is retryable.
+    ///
+    /// Returns `true` for transient errors that may succeed if retried:
+    /// - [`Connection`](Self::Connection) errors
+    /// - [`Timeout`](Self::Timeout) errors  
+    /// - [`Io`](Self::Io) errors
+    ///
+    /// Returns `false` for permanent errors that won't succeed on retry:
+    /// - [`Server`](Self::Server) errors (4xx/5xx HTTP responses)
+    /// - [`Validation`](Self::Validation) errors
+    /// - [`Serialization`](Self::Serialization) errors
+    /// - [`MaxRetriesExceeded`](Self::MaxRetriesExceeded) errors
+    /// - [`MessageTooLarge`](Self::MessageTooLarge) errors
+    ///
+    /// This method is used internally by the retry mechanism to determine
+    /// whether to attempt retrying a failed operation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tlq_client::TlqError;
+    ///
+    /// let timeout_error = TlqError::Timeout(5000);
+    /// assert!(timeout_error.is_retryable());
+    ///
+    /// let validation_error = TlqError::Validation("Invalid input".to_string());
+    /// assert!(!validation_error.is_retryable());
+    /// ```
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -36,6 +138,21 @@ impl TlqError {
     }
 }
 
+/// Type alias for `Result<T, TlqError>`.
+///
+/// This is a convenience alias that makes function signatures more concise
+/// throughout the TLQ client library.
+///
+/// # Examples
+///
+/// ```
+/// use tlq_client::{Result, Message};
+///
+/// fn process_message() -> Result<Message> {
+///     // Return either Ok(message) or Err(TlqError)
+///     # Ok(Message::new("test".to_string()))
+/// }
+/// ```
 pub type Result<T> = std::result::Result<T, TlqError>;
 
 #[cfg(test)]

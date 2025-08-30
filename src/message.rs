@@ -1,25 +1,92 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Represents a message in the TLQ queue system.
+///
+/// Each message has a unique identifier, content, and metadata about its processing state.
+/// Messages are automatically assigned UUID v7 identifiers which provide time-ordering.
+///
+/// # Examples
+///
+/// ```
+/// use tlq_client::Message;
+///
+/// // Create a new message
+/// let message = Message::new("Hello, World!".to_string());
+/// println!("Message ID: {}", message.id);
+/// println!("Message body: {}", message.body);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
+    /// Unique identifier for the message (UUID v7 format for time-ordering)
     pub id: Uuid,
+    /// The message content/body as a string
     pub body: String,
+    /// Current processing state of the message
     pub state: MessageState,
+    /// Optional ISO datetime string indicating when the message lock expires
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_until: Option<String>, // ISO datetime string
+    /// Number of times this message has been retried after failure
     pub retry_count: u32,
 }
 
+/// Represents the current processing state of a message in the queue.
+///
+/// Messages transition through these states as they are processed:
+/// - `Ready` → `Processing` (when retrieved by a consumer)
+/// - `Processing` → `Failed` (if processing fails)
+/// - `Failed` → `Ready` (when retried)
+/// - Any state → deleted (when explicitly deleted)
+///
+/// # Serialization
+///
+/// States are serialized in PascalCase format ("Ready", "Processing", "Failed")
+/// to match the TLQ server API expectations.
+///
+/// # Examples
+///
+/// ```
+/// use tlq_client::MessageState;
+///
+/// let state = MessageState::Ready;
+/// assert_eq!(serde_json::to_string(&state).unwrap(), "\"Ready\"");
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub enum MessageState {
+    /// Message is ready to be processed by a consumer
     Ready,
+    /// Message is currently being processed by a consumer
     Processing,
+    /// Message processing failed and may need to be retried
     Failed,
 }
 
 impl Message {
+    /// Creates a new message with the specified body content.
+    ///
+    /// The message is initialized with:
+    /// - A new UUID v7 identifier (provides time-ordering)
+    /// - State set to [`MessageState::Ready`]
+    /// - No lock expiration time
+    /// - Zero retry count
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The message content as a String
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tlq_client::{Message, MessageState};
+    ///
+    /// let message = Message::new("Process this task".to_string());
+    /// assert_eq!(message.body, "Process this task");
+    /// assert_eq!(message.state, MessageState::Ready);
+    /// assert_eq!(message.retry_count, 0);
+    /// assert!(message.lock_until.is_none());
+    /// ```
     pub fn new(body: String) -> Self {
         Self {
             id: Uuid::now_v7(),
@@ -31,21 +98,27 @@ impl Message {
     }
 }
 
+// Internal request structures for TLQ API communication
+
+/// Request structure for adding a message to the queue
 #[derive(Debug, Serialize)]
 pub struct AddMessageRequest {
     pub body: String,
 }
 
+/// Request structure for retrieving messages from the queue
 #[derive(Debug, Serialize)]
 pub struct GetMessagesRequest {
     pub count: u32,
 }
 
+/// Request structure for deleting messages from the queue
 #[derive(Debug, Serialize)]
 pub struct DeleteMessagesRequest {
     pub ids: Vec<Uuid>,
 }
 
+/// Request structure for retrying failed messages
 #[derive(Debug, Serialize)]
 pub struct RetryMessagesRequest {
     pub ids: Vec<Uuid>,

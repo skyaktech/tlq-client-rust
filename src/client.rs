@@ -13,23 +13,123 @@ use uuid::Uuid;
 
 const MAX_MESSAGE_SIZE: usize = 65536;
 
+/// The main client for interacting with TLQ (Tiny Little Queue) servers.
+///
+/// `TlqClient` provides an async, type-safe interface for all TLQ operations including
+/// adding messages, retrieving messages, and managing queue state. The client handles
+/// automatic retry with exponential backoff for transient failures.
+///
+/// # Examples
+///
+/// Basic usage:
+/// ```no_run
+/// use tlq_client::TlqClient;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), tlq_client::TlqError> {
+///     let client = TlqClient::new("localhost", 1337)?;
+///     
+///     // Add a message
+///     let message = client.add_message("Hello, World!").await?;
+///     println!("Added message: {}", message.id);
+///     
+///     // Get messages
+///     let messages = client.get_messages(1).await?;
+///     if let Some(msg) = messages.first() {
+///         println!("Retrieved: {}", msg.body);
+///     }
+///     
+///     Ok(())
+/// }
+/// ```
 pub struct TlqClient {
     config: Config,
     base_url: String,
 }
 
 impl TlqClient {
+    /// Creates a new TLQ client with default configuration.
+    ///
+    /// This is the simplest way to create a client, using default values for
+    /// timeout (30s), max retries (3), and retry delay (100ms).
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - The hostname or IP address of the TLQ server
+    /// * `port` - The port number of the TLQ server
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// # fn example() -> Result<(), tlq_client::TlqError> {
+    /// let client = TlqClient::new("localhost", 1337)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Currently this method always returns `Ok`, but the `Result` is preserved
+    /// for future compatibility.
     pub fn new(host: impl Into<String>, port: u16) -> Result<Self> {
         let config = ConfigBuilder::new().host(host).port(port).build();
 
         Ok(Self::with_config(config))
     }
 
+    /// Creates a new TLQ client with custom configuration.
+    ///
+    /// Use this method when you need to customize timeout, retry behavior,
+    /// or other client settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - A [`Config`] instance with your desired settings
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::{TlqClient, ConfigBuilder};
+    /// use std::time::Duration;
+    ///
+    /// # fn example() {
+    /// let config = ConfigBuilder::new()
+    ///     .host("queue.example.com")
+    ///     .port(8080)
+    ///     .timeout(Duration::from_secs(5))
+    ///     .max_retries(2)
+    ///     .build();
+    ///
+    /// let client = TlqClient::with_config(config);
+    /// # }
+    /// ```
     pub fn with_config(config: Config) -> Self {
         let base_url = format!("{}:{}", config.host, config.port);
         Self { config, base_url }
     }
 
+    /// Returns a [`ConfigBuilder`] for creating custom configurations.
+    ///
+    /// This is a convenience method that's equivalent to [`ConfigBuilder::new()`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    /// use std::time::Duration;
+    ///
+    /// # fn example() {
+    /// let client = TlqClient::with_config(
+    ///     TlqClient::builder()
+    ///         .host("localhost")
+    ///         .port(1337)
+    ///         .timeout(Duration::from_secs(10))
+    ///         .build()
+    /// );
+    /// # }
+    /// ```
     pub fn builder() -> ConfigBuilder {
         ConfigBuilder::new()
     }
@@ -82,6 +182,41 @@ impl TlqClient {
         serde_json::from_str(body).map_err(Into::into)
     }
 
+    /// Performs a health check against the TLQ server.
+    ///
+    /// This method sends a GET request to the `/hello` endpoint to verify
+    /// that the server is responding. It uses a fixed 5-second timeout
+    /// regardless of the client's configured timeout.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` if the server responds with HTTP 200 OK
+    /// * `Ok(false)` if the server responds but not with 200 OK
+    /// * `Err` if there's a connection error or timeout
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     if client.health_check().await? {
+    ///         println!("Server is healthy");
+    ///     } else {
+    ///         println!("Server is not responding correctly");
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TlqError::Connection`] for network issues, or [`TlqError::Timeout`]
+    /// if the server doesn't respond within 5 seconds.
     pub async fn health_check(&self) -> Result<bool> {
         let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&self.base_url))
             .await
@@ -106,6 +241,46 @@ impl TlqClient {
         Ok(response_str.contains("200 OK"))
     }
 
+    /// Adds a new message to the TLQ server.
+    ///
+    /// The message will be assigned a UUID v7 identifier and placed in the queue
+    /// with state [`MessageState::Ready`]. Messages have a maximum size limit of 64KB.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The message content (any type that can be converted to String)
+    ///
+    /// # Returns
+    ///
+    /// Returns the created [`Message`] with its assigned ID and metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     // Add a simple string message
+    ///     let message = client.add_message("Hello, World!").await?;
+    ///     println!("Created message {} with body: {}", message.id, message.body);
+    ///
+    ///     // Add a formatted message
+    ///     let user_data = "important data";
+    ///     let message = client.add_message(format!("Processing: {}", user_data)).await?;
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::MessageTooLarge`] if the message exceeds 64KB (65,536 bytes)
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn add_message(&self, body: impl Into<String>) -> Result<Message> {
         let body = body.into();
 
@@ -118,6 +293,53 @@ impl TlqClient {
         Ok(message)
     }
 
+    /// Retrieves multiple messages from the TLQ server.
+    ///
+    /// This method fetches up to `count` messages from the queue. Messages are returned
+    /// in the order they were added and their state is changed to [`MessageState::Processing`].
+    /// The server may return fewer messages than requested if there are not enough
+    /// messages in the queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - Maximum number of messages to retrieve (must be greater than 0)
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of [`Message`] objects. The vector may be empty if no messages
+    /// are available in the queue.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     // Get up to 5 messages from the queue
+    ///     let messages = client.get_messages(5).await?;
+    ///     
+    ///     for message in messages {
+    ///         println!("Processing message {}: {}", message.id, message.body);
+    ///         
+    ///         // Process the message...
+    ///         
+    ///         // Delete when done
+    ///         client.delete_message(message.id).await?;
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Validation`] if count is 0
+    /// * [`TlqError::Connection`] for network connectivity issues  
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn get_messages(&self, count: u32) -> Result<Vec<Message>> {
         if count == 0 {
             return Err(TlqError::Validation(
@@ -130,15 +352,128 @@ impl TlqClient {
         Ok(messages)
     }
 
+    /// Retrieves a single message from the TLQ server.
+    ///
+    /// This is a convenience method equivalent to calling [`get_messages(1)`](Self::get_messages)
+    /// and taking the first result. If no messages are available, returns `None`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(message))` if a message was retrieved
+    /// * `Ok(None)` if no messages are available in the queue
+    /// * `Err` for connection or server errors
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     // Get a single message
+    ///     match client.get_message().await? {
+    ///         Some(message) => {
+    ///             println!("Got message: {}", message.body);
+    ///             client.delete_message(message.id).await?;
+    ///         }
+    ///         None => println!("No messages available"),
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out  
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn get_message(&self) -> Result<Option<Message>> {
         let messages = self.get_messages(1).await?;
         Ok(messages.into_iter().next())
     }
 
+    /// Deletes a single message from the TLQ server.
+    ///
+    /// This is a convenience method that calls [`delete_messages`](Self::delete_messages)
+    /// with a single message ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The UUID of the message to delete
+    ///
+    /// # Returns
+    ///
+    /// Returns a string indicating the result of the operation (typically "Success" or a count).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     if let Some(message) = client.get_message().await? {
+    ///         let result = client.delete_message(message.id).await?;
+    ///         println!("Delete result: {}", result);
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn delete_message(&self, id: Uuid) -> Result<String> {
         self.delete_messages(&[id]).await
     }
 
+    /// Deletes multiple messages from the TLQ server.
+    ///
+    /// This method removes the specified messages from the queue permanently.
+    /// Messages can be in any state when deleted.
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` - A slice of message UUIDs to delete (must not be empty)
+    ///
+    /// # Returns
+    ///
+    /// Returns a string indicating the number of messages deleted or "Success".
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     let messages = client.get_messages(3).await?;
+    ///     if !messages.is_empty() {
+    ///         let ids: Vec<_> = messages.iter().map(|m| m.id).collect();
+    ///         let result = client.delete_messages(&ids).await?;
+    ///         println!("Deleted {} messages", result);
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Validation`] if the `ids` slice is empty
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn delete_messages(&self, ids: &[Uuid]) -> Result<String> {
         if ids.is_empty() {
             return Err(TlqError::Validation("No message IDs provided".to_string()));
@@ -149,10 +484,97 @@ impl TlqClient {
         Ok(response)
     }
 
+    /// Retries a single failed message on the TLQ server.
+    ///
+    /// This is a convenience method that calls [`retry_messages`](Self::retry_messages)
+    /// with a single message ID. The message state will be changed from
+    /// [`MessageState::Failed`] back to [`MessageState::Ready`].
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The UUID of the message to retry
+    ///
+    /// # Returns
+    ///
+    /// Returns a string indicating the result of the operation (typically "Success" or a count).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::{TlqClient, MessageState};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     // Find failed messages and retry them
+    ///     let messages = client.get_messages(10).await?;
+    ///     for message in messages {
+    ///         if message.state == MessageState::Failed {
+    ///             let result = client.retry_message(message.id).await?;
+    ///             println!("Retry result: {}", result);
+    ///         }
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn retry_message(&self, id: Uuid) -> Result<String> {
         self.retry_messages(&[id]).await
     }
 
+    /// Retries multiple failed messages on the TLQ server.
+    ///
+    /// This method changes the state of the specified messages from [`MessageState::Failed`]
+    /// back to [`MessageState::Ready`], making them available for processing again.
+    /// The retry count for each message will be incremented.
+    ///
+    /// # Arguments
+    ///
+    /// * `ids` - A slice of message UUIDs to retry (must not be empty)
+    ///
+    /// # Returns
+    ///
+    /// Returns a string indicating the number of messages retried or "Success".
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::{TlqClient, MessageState};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     // Get all messages and retry the failed ones
+    ///     let messages = client.get_messages(100).await?;
+    ///     let failed_ids: Vec<_> = messages
+    ///         .iter()
+    ///         .filter(|m| m.state == MessageState::Failed)
+    ///         .map(|m| m.id)
+    ///         .collect();
+    ///
+    ///     if !failed_ids.is_empty() {
+    ///         let result = client.retry_messages(&failed_ids).await?;
+    ///         println!("Retried {} failed messages", result);
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Validation`] if the `ids` slice is empty
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn retry_messages(&self, ids: &[Uuid]) -> Result<String> {
         if ids.is_empty() {
             return Err(TlqError::Validation("No message IDs provided".to_string()));
@@ -163,6 +585,37 @@ impl TlqClient {
         Ok(response)
     }
 
+    /// Removes all messages from the TLQ server queue.
+    ///
+    /// This method permanently deletes all messages in the queue regardless of their state.
+    /// Use with caution as this operation cannot be undone.
+    ///
+    /// # Returns
+    ///
+    /// Returns a string indicating the result of the operation (typically "Success").
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     // Clear all messages from the queue
+    ///     let result = client.purge_queue().await?;
+    ///     println!("Purge result: {}", result);
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn purge_queue(&self) -> Result<String> {
         let response: String = self.request("/purge", &serde_json::json!({})).await?;
         Ok(response)

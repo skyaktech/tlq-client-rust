@@ -1,12 +1,26 @@
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Internal retry strategy with exponential backoff for TLQ client operations.
+///
+/// This struct implements an exponential backoff retry mechanism that automatically
+/// retries failed operations up to a maximum number of attempts. The delay between
+/// retries doubles with each attempt: `base_delay × 2^attempt_number`.
+///
+/// Used internally by [`TlqClient`](crate::TlqClient) to handle transient failures
+/// like network connectivity issues and timeouts.
 pub struct RetryStrategy {
     max_retries: u32,
     base_delay: Duration,
 }
 
 impl RetryStrategy {
+    /// Creates a new retry strategy with the specified parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_retries` - Maximum number of retry attempts (0 disables retries)
+    /// * `base_delay` - Base delay for exponential backoff calculation
     pub fn new(max_retries: u32, base_delay: Duration) -> Self {
         Self {
             max_retries,
@@ -14,6 +28,27 @@ impl RetryStrategy {
         }
     }
 
+    /// Executes an async operation with automatic retry on failure.
+    ///
+    /// This method will execute the provided operation and retry it on failure
+    /// up to `max_retries` times. Between each retry attempt, it waits for an
+    /// exponentially increasing delay.
+    ///
+    /// # Arguments
+    ///
+    /// * `operation` - A closure that returns a Future yielding Result<T, E>
+    ///
+    /// # Returns
+    ///
+    /// Returns the first successful result, or the last error if all attempts fail.
+    ///
+    /// # Retry Behavior
+    ///
+    /// - Attempt 0: No delay, execute immediately
+    /// - Attempt 1: Wait `base_delay × 2^0` = base_delay
+    /// - Attempt 2: Wait `base_delay × 2^1` = base_delay × 2
+    /// - Attempt 3: Wait `base_delay × 2^2` = base_delay × 4
+    /// - And so on...
     pub async fn execute<F, Fut, T, E>(&self, mut operation: F) -> Result<T, E>
     where
         F: FnMut() -> Fut,
@@ -38,6 +73,24 @@ impl RetryStrategy {
         }
     }
 
+    /// Calculates the delay duration for a given retry attempt using exponential backoff.
+    ///
+    /// The delay formula is: `base_delay × 2^attempt_number`
+    ///
+    /// # Arguments
+    ///
+    /// * `attempt` - The retry attempt number (0-based)
+    ///
+    /// # Returns
+    ///
+    /// The duration to wait before the next retry attempt.
+    ///
+    /// # Examples
+    ///
+    /// With `base_delay = 100ms`:
+    /// - Attempt 0: 100ms × 2^0 = 100ms
+    /// - Attempt 1: 100ms × 2^1 = 200ms  
+    /// - Attempt 2: 100ms × 2^2 = 400ms
     fn calculate_delay(&self, attempt: u32) -> Duration {
         let multiplier = 2_u32.pow(attempt);
         self.base_delay * multiplier
