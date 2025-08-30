@@ -10,6 +10,7 @@ A high-performance, async Rust client for [TLQ (Tiny Little Queue)](https://gith
 - **Type-safe** message handling
 - **Zero external dependencies** (only tokio, serde, uuid, thiserror)
 - **High performance** with minimal overhead
+- **Comprehensive documentation** with examples and API reference
 
 ## Installation
 
@@ -17,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tlq-client = "0.1.0"
+tlq-client = "0.2"
 ```
 
 ## Quick Start
@@ -73,6 +74,17 @@ let client = TlqClient::with_config(client);
 - `timeout`: Request timeout (default: 30 seconds)
 - `max_retries`: Maximum retry attempts (default: 3)
 - `retry_delay`: Base delay between retries (default: 100ms)
+
+## Documentation
+
+This crate provides comprehensive API documentation with examples for all public APIs. View the full documentation at [docs.rs/tlq-client](https://docs.rs/tlq-client).
+
+Key documentation highlights:
+- Complete API reference with examples
+- Error handling patterns and best practices  
+- Configuration options and builder patterns
+- Usage examples for all operations
+- Internal implementation details where relevant
 
 ## API Reference
 
