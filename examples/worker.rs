@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match client.get_message().await {
             Ok(Some(message)) => {
                 println!("Processing message {}: {}", message.id, message.body);
-                
+
                 match process_message(&message.body).await {
                     Ok(_) => {
                         println!("✅ Successfully processed message {}", message.id);
@@ -27,9 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         println!("❌ Failed to process message {}: {}", message.id, e);
-                        
+
                         if message.retry_count < 3 {
-                            println!("Retrying message {} (attempt {})", message.id, message.retry_count + 1);
+                            println!(
+                                "Retrying message {} (attempt {})",
+                                message.id,
+                                message.retry_count + 1
+                            );
                             client.retry_message(message.id).await?;
                         } else {
                             println!("Message {} exceeded max retries, deleting", message.id);
@@ -53,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn process_message(body: &str) -> Result<(), String> {
     println!("  Processing: {}", body);
     sleep(Duration::from_millis(100)).await;
-    
+
     if body.contains("error") {
         Err("Message contains 'error'".to_string())
     } else {

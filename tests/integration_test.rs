@@ -23,9 +23,9 @@ async fn test_client_builder() {
 async fn test_message_size_validation() {
     let client = TlqClient::new("localhost", 1337).unwrap();
     let large_message = "x".repeat(100_000);
-    
+
     let result = client.add_message(large_message).await;
-    
+
     match result {
         Err(TlqError::MessageTooLarge { size }) => {
             assert_eq!(size, 100_000);
@@ -38,13 +38,13 @@ async fn test_message_size_validation() {
 async fn test_error_types() {
     let timeout_err = TlqError::Timeout(5000);
     assert!(timeout_err.is_retryable());
-    
+
     let connection_err = TlqError::Connection("test".to_string());
     assert!(connection_err.is_retryable());
-    
+
     let validation_err = TlqError::Validation("test".to_string());
     assert!(!validation_err.is_retryable());
-    
+
     let server_err = TlqError::Server {
         status: 500,
         message: "Internal Server Error".to_string(),
@@ -54,8 +54,8 @@ async fn test_error_types() {
 
 #[cfg(test)]
 mod config_tests {
-    use tlq_client::ConfigBuilder;
     use std::time::Duration;
+    use tlq_client::ConfigBuilder;
 
     #[test]
     fn test_config_builder() {
@@ -93,7 +93,7 @@ mod message_tests {
     #[test]
     fn test_message_creation() {
         let message = Message::new("Test message".to_string());
-        
+
         assert_eq!(message.body, "Test message");
         assert_eq!(message.state, MessageState::Ready);
         assert_eq!(message.retry_count, 0);

@@ -20,11 +20,8 @@ pub struct TlqClient {
 
 impl TlqClient {
     pub fn new(host: impl Into<String>, port: u16) -> Result<Self> {
-        let config = ConfigBuilder::new()
-            .host(host)
-            .port(port)
-            .build();
-        
+        let config = ConfigBuilder::new().host(host).port(port).build();
+
         Ok(Self::with_config(config))
     }
 
@@ -55,7 +52,7 @@ impl TlqClient {
         R: DeserializeOwned,
     {
         let json_body = serde_json::to_vec(body)?;
-        
+
         let request = format!(
             "POST {} HTTP/1.1\r\n\
              Host: {}\r\n\
@@ -67,13 +64,10 @@ impl TlqClient {
             json_body.len()
         );
 
-        let mut stream = timeout(
-            self.config.timeout,
-            TcpStream::connect(&self.base_url),
-        )
-        .await
-        .map_err(|_| TlqError::Timeout(self.config.timeout.as_millis() as u64))?
-        .map_err(|e| TlqError::Connection(e.to_string()))?;
+        let mut stream = timeout(self.config.timeout, TcpStream::connect(&self.base_url))
+            .await
+            .map_err(|_| TlqError::Timeout(self.config.timeout.as_millis() as u64))?
+            .map_err(|e| TlqError::Connection(e.to_string()))?;
 
         stream.write_all(request.as_bytes()).await?;
         stream.write_all(&json_body).await?;
@@ -82,7 +76,7 @@ impl TlqClient {
         stream.read_to_end(&mut response).await?;
 
         let response_str = String::from_utf8_lossy(&response);
-        
+
         if let Some(body_start) = response_str.find("\r\n\r\n") {
             let headers = &response_str[..body_start];
             let body = &response_str[body_start + 4..];
@@ -108,13 +102,10 @@ impl TlqClient {
     }
 
     pub async fn health_check(&self) -> Result<bool> {
-        let mut stream = timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(&self.base_url),
-        )
-        .await
-        .map_err(|_| TlqError::Timeout(5000))?
-        .map_err(|e| TlqError::Connection(e.to_string()))?;
+        let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&self.base_url))
+            .await
+            .map_err(|_| TlqError::Timeout(5000))?
+            .map_err(|e| TlqError::Connection(e.to_string()))?;
 
         let request = format!(
             "GET /hello HTTP/1.1\r\n\
@@ -124,17 +115,17 @@ impl TlqClient {
         );
 
         stream.write_all(request.as_bytes()).await?;
-        
+
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await?;
-        
+
         let response_str = String::from_utf8_lossy(&response);
         Ok(response_str.contains("200 OK"))
     }
 
     pub async fn add_message(&self, body: impl Into<String>) -> Result<Message> {
         let body = body.into();
-        
+
         if body.len() > MAX_MESSAGE_SIZE {
             return Err(TlqError::MessageTooLarge { size: body.len() });
         }
@@ -146,7 +137,9 @@ impl TlqClient {
 
     pub async fn get_messages(&self, count: u32) -> Result<Vec<Message>> {
         if count == 0 {
-            return Err(TlqError::Validation("Count must be greater than 0".to_string()));
+            return Err(TlqError::Validation(
+                "Count must be greater than 0".to_string(),
+            ));
         }
 
         let request = GetMessagesRequest { count };
@@ -168,9 +161,7 @@ impl TlqClient {
             return Err(TlqError::Validation("No message IDs provided".to_string()));
         }
 
-        let request = DeleteMessagesRequest {
-            ids: ids.to_vec(),
-        };
+        let request = DeleteMessagesRequest { ids: ids.to_vec() };
         let response: DeleteMessagesResponse = self.request("/delete", &request).await?;
         Ok(response.deleted_count)
     }
@@ -184,9 +175,7 @@ impl TlqClient {
             return Err(TlqError::Validation("No message IDs provided".to_string()));
         }
 
-        let request = RetryMessagesRequest {
-            ids: ids.to_vec(),
-        };
+        let request = RetryMessagesRequest { ids: ids.to_vec() };
         let response: RetryMessagesResponse = self.request("/retry", &request).await?;
         Ok(response.retry_count)
     }
