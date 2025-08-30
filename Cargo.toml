@@ -1,0 +1,27 @@
+[package]
+name = "tlq-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Rust client for TLQ (Tiny Little Queue) message queue server"
+repository = "https://github.com/skyaktech/tlq-client-rust"
+homepage = "https://github.com/skyaktech/tlq-client-rust"
+license = "MIT OR Apache-2.0"
+keywords = ["queue", "messaging", "tlq", "client", "async"]
+categories = ["network-programming", "asynchronous"]
+readme = "README.md"
+
+[dependencies]
+tokio = { version = "1.41", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.11", features = ["v7", "serde"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
