@@ -47,7 +47,7 @@ mod tests {
     fn test_connection_error_retryable() {
         let error = TlqError::Connection("Connection refused".to_string());
         assert!(error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert_eq!(error_msg, "Connection error: Connection refused");
     }
@@ -56,7 +56,7 @@ mod tests {
     fn test_timeout_error_retryable() {
         let error = TlqError::Timeout(5000);
         assert!(error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert_eq!(error_msg, "Timeout error after 5000ms");
     }
@@ -66,7 +66,7 @@ mod tests {
         let io_error = IoError::new(ErrorKind::ConnectionRefused, "Connection refused");
         let error = TlqError::Io(io_error);
         assert!(error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert!(error_msg.contains("IO error:"));
         assert!(error_msg.contains("Connection refused"));
@@ -79,7 +79,7 @@ mod tests {
             message: "Internal Server Error".to_string(),
         };
         assert!(!error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert_eq!(error_msg, "Server error: 500 - Internal Server Error");
     }
@@ -88,7 +88,7 @@ mod tests {
     fn test_validation_error_not_retryable() {
         let error = TlqError::Validation("Invalid input".to_string());
         assert!(!error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert_eq!(error_msg, "Validation error: Invalid input");
     }
@@ -96,11 +96,10 @@ mod tests {
     #[test]
     fn test_serialization_error_not_retryable() {
         // Create a serde_json error
-        let json_error = serde_json::from_str::<serde_json::Value>("invalid json")
-            .unwrap_err();
+        let json_error = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let error = TlqError::Serialization(json_error);
         assert!(!error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert!(error_msg.contains("Serialization error:"));
     }
@@ -109,7 +108,7 @@ mod tests {
     fn test_max_retries_exceeded_not_retryable() {
         let error = TlqError::MaxRetriesExceeded { max_retries: 3 };
         assert!(!error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert_eq!(error_msg, "Max retries exceeded (3) for operation");
     }
@@ -118,7 +117,7 @@ mod tests {
     fn test_message_too_large_not_retryable() {
         let error = TlqError::MessageTooLarge { size: 70000 };
         assert!(!error.is_retryable());
-        
+
         let error_msg = format!("{}", error);
         assert_eq!(error_msg, "Message too large: 70000 bytes (max: 65536)");
     }
@@ -127,17 +126,16 @@ mod tests {
     fn test_error_from_io_error() {
         let io_error = IoError::new(ErrorKind::PermissionDenied, "Access denied");
         let tlq_error: TlqError = io_error.into();
-        
+
         assert!(tlq_error.is_retryable()); // IO errors are retryable
         assert!(matches!(tlq_error, TlqError::Io(_)));
     }
 
     #[test]
     fn test_error_from_serde_json_error() {
-        let json_error = serde_json::from_str::<serde_json::Value>("{invalid}")
-            .unwrap_err();
+        let json_error = serde_json::from_str::<serde_json::Value>("{invalid}").unwrap_err();
         let tlq_error: TlqError = json_error.into();
-        
+
         assert!(!tlq_error.is_retryable()); // Serialization errors are not retryable
         assert!(matches!(tlq_error, TlqError::Serialization(_)));
     }
@@ -156,7 +154,7 @@ mod tests {
         for kind in error_kinds {
             let io_error = IoError::new(kind, format!("{:?} error", kind));
             let tlq_error = TlqError::Io(io_error);
-            
+
             // All IO errors should be retryable
             assert!(tlq_error.is_retryable());
         }
@@ -180,10 +178,10 @@ mod tests {
                 status,
                 message: message.to_string(),
             };
-            
+
             // Server errors should not be retryable
             assert!(!error.is_retryable());
-            
+
             let error_msg = format!("{}", error);
             assert!(error_msg.contains(&status.to_string()));
             assert!(error_msg.contains(message));
@@ -203,11 +201,13 @@ mod tests {
         // Test that our Result type alias works correctly
         let success: Result<String> = Ok("success".to_string());
         assert!(success.is_ok());
-        assert_eq!(success.unwrap(), "success");
+        if let Ok(value) = success {
+            assert_eq!(value, "success");
+        }
 
         let failure: Result<String> = Err(TlqError::Validation("test error".to_string()));
         assert!(failure.is_err());
-        
+
         match failure {
             Err(TlqError::Validation(msg)) => assert_eq!(msg, "test error"),
             _ => panic!("Expected validation error"),
@@ -223,20 +223,32 @@ mod tests {
 
         let timeout_max = TlqError::Timeout(u64::MAX);
         assert!(timeout_max.is_retryable());
-        assert_eq!(format!("{}", timeout_max), format!("Timeout error after {}ms", u64::MAX));
+        assert_eq!(
+            format!("{}", timeout_max),
+            format!("Timeout error after {}ms", u64::MAX)
+        );
     }
 
     #[test]
     fn test_message_size_edge_cases() {
         // Test various message sizes
         let size_0 = TlqError::MessageTooLarge { size: 0 };
-        assert_eq!(format!("{}", size_0), "Message too large: 0 bytes (max: 65536)");
+        assert_eq!(
+            format!("{}", size_0),
+            "Message too large: 0 bytes (max: 65536)"
+        );
 
         let size_max = TlqError::MessageTooLarge { size: usize::MAX };
-        assert_eq!(format!("{}", size_max), format!("Message too large: {} bytes (max: 65536)", usize::MAX));
+        assert_eq!(
+            format!("{}", size_max),
+            format!("Message too large: {} bytes (max: 65536)", usize::MAX)
+        );
 
         let size_just_over = TlqError::MessageTooLarge { size: 65537 };
-        assert_eq!(format!("{}", size_just_over), "Message too large: 65537 bytes (max: 65536)");
+        assert_eq!(
+            format!("{}", size_just_over),
+            "Message too large: 65537 bytes (max: 65536)"
+        );
     }
 
     #[test]

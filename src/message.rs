@@ -59,11 +59,11 @@ mod tests {
     #[test]
     fn test_message_creation() {
         let message = Message::new("Test message".to_string());
-        
+
         assert_eq!(message.body, "Test message");
         assert_eq!(message.state, MessageState::Ready);
         assert_eq!(message.retry_count, 0);
-        
+
         // UUID should be valid
         assert!(!message.id.to_string().is_empty());
     }
@@ -71,9 +71,18 @@ mod tests {
     #[test]
     fn test_message_state_serialization() {
         // Test that MessageState serializes to the expected Pascal case
-        assert_eq!(serde_json::to_string(&MessageState::Ready).unwrap(), "\"Ready\"");
-        assert_eq!(serde_json::to_string(&MessageState::Processing).unwrap(), "\"Processing\"");
-        assert_eq!(serde_json::to_string(&MessageState::Failed).unwrap(), "\"Failed\"");
+        assert_eq!(
+            serde_json::to_string(&MessageState::Ready).unwrap(),
+            "\"Ready\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageState::Processing).unwrap(),
+            "\"Processing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageState::Failed).unwrap(),
+            "\"Failed\""
+        );
     }
 
     #[test]
@@ -98,10 +107,10 @@ mod tests {
         // Test that invalid states fail to deserialize
         let result = serde_json::from_str::<MessageState>("\"Invalid\"");
         assert!(result.is_err());
-        
+
         let result = serde_json::from_str::<MessageState>("\"ready\""); // lowercase
         assert!(result.is_err());
-        
+
         let result = serde_json::from_str::<MessageState>("\"READY\""); // uppercase
         assert!(result.is_err());
     }
@@ -109,15 +118,15 @@ mod tests {
     #[test]
     fn test_message_serialization() {
         let message = Message::new("test body".to_string());
-        
+
         let json = serde_json::to_string(&message).unwrap();
-        
+
         // Should contain all fields
         assert!(json.contains("\"id\":"));
         assert!(json.contains("\"body\":\"test body\""));
         assert!(json.contains("\"state\":\"Ready\""));
         assert!(json.contains("\"retry_count\":0"));
-        
+
         // Should deserialize back correctly
         let deserialized: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.body, message.body);
@@ -130,9 +139,9 @@ mod tests {
     fn test_message_with_special_characters() {
         let special_body = "Test with 🦀 emojis and \"quotes\" and \n newlines \t tabs";
         let message = Message::new(special_body.to_string());
-        
+
         assert_eq!(message.body, special_body);
-        
+
         // Should serialize and deserialize correctly
         let json = serde_json::to_string(&message).unwrap();
         let deserialized: Message = serde_json::from_str(&json).unwrap();
@@ -143,7 +152,7 @@ mod tests {
     fn test_message_with_very_long_body() {
         let long_body = "a".repeat(100_000);
         let message = Message::new(long_body.clone());
-        
+
         assert_eq!(message.body, long_body);
         assert_eq!(message.body.len(), 100_000);
     }
@@ -151,7 +160,7 @@ mod tests {
     #[test]
     fn test_message_with_empty_body() {
         let message = Message::new("".to_string());
-        
+
         assert_eq!(message.body, "");
         assert_eq!(message.state, MessageState::Ready);
         assert_eq!(message.retry_count, 0);
@@ -182,9 +191,7 @@ mod tests {
         assert!(json.contains("\"ids\":"));
 
         // Test RetryMessagesRequest
-        let retry_req = RetryMessagesRequest {
-            ids: vec![id1],
-        };
+        let retry_req = RetryMessagesRequest { ids: vec![id1] };
         let json = serde_json::to_string(&retry_req).unwrap();
         assert!(json.contains("\"ids\":"));
     }
@@ -193,7 +200,7 @@ mod tests {
     fn test_response_deserialization() {
         // Test direct Message response (for add_message)
         let message_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test","state":"Ready","lock_until":null,"retry_count":0}"#;
-        let message: Message = serde_json::from_str(&message_json).unwrap();
+        let message: Message = serde_json::from_str(message_json).unwrap();
         assert_eq!(message.body, "test");
         assert_eq!(message.state, MessageState::Ready);
         assert_eq!(message.retry_count, 0);
@@ -201,7 +208,7 @@ mod tests {
 
         // Test array of messages response (for get_messages)
         let messages_json = r#"[{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test1","state":"Processing","lock_until":null,"retry_count":1}]"#;
-        let messages: Vec<Message> = serde_json::from_str(&messages_json).unwrap();
+        let messages: Vec<Message> = serde_json::from_str(messages_json).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].body, "test1");
         assert_eq!(messages[0].state, MessageState::Processing);
@@ -219,27 +226,27 @@ mod tests {
     fn test_malformed_response_deserialization() {
         // Test that malformed JSON fails gracefully
         let malformed_json = r#"{"id": invalid}"#;
-        let result = serde_json::from_str::<Message>(&malformed_json);
+        let result = serde_json::from_str::<Message>(malformed_json);
         assert!(result.is_err());
 
         // Test missing required fields in Message
         let incomplete_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test"}"#; // Missing state and retry_count
-        let result = serde_json::from_str::<Message>(&incomplete_json);
+        let result = serde_json::from_str::<Message>(incomplete_json);
         assert!(result.is_err());
 
         // Test wrong field types in Message
         let wrong_type_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test","state":"Ready","retry_count":"not_a_number"}"#;
-        let result = serde_json::from_str::<Message>(&wrong_type_json);
+        let result = serde_json::from_str::<Message>(wrong_type_json);
         assert!(result.is_err());
 
         // Test malformed message with invalid UUID
         let bad_uuid_json = r#"{"id":"invalid-uuid","body":"test","state":"Ready","lock_until":null,"retry_count":0}"#;
-        let result = serde_json::from_str::<Message>(&bad_uuid_json);
+        let result = serde_json::from_str::<Message>(bad_uuid_json);
         assert!(result.is_err()); // Should fail due to invalid UUID
 
         // Test malformed array
         let bad_array_json = r#"[{"id":"invalid"}]"#;
-        let result = serde_json::from_str::<Vec<Message>>(&bad_array_json);
+        let result = serde_json::from_str::<Vec<Message>>(bad_array_json);
         assert!(result.is_err());
     }
 }
