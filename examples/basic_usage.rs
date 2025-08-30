@@ -24,9 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(msg) = messages.first() {
         println!("\nDeleting message {}...", msg.id);
-        let deleted = client.delete_message(msg.id).await?;
-        println!("Deleted {} message(s)", deleted);
+        let delete_result = client.delete_message(msg.id).await?;
+        println!("Delete result: {}", delete_result);
     }
 
+    println!("\nPurging any remaining messages...");
+    let purge_result = client.purge_queue().await?;
+    println!("Purge result: {}", purge_result);
+
+    println!("\n✅ All operations completed successfully!");
     Ok(())
 }
