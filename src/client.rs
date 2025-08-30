@@ -58,6 +58,7 @@ impl TlqClient {
              Host: {}\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
+             Connection: close\r\n\
              \r\n",
             endpoint,
             self.base_url,
@@ -71,6 +72,7 @@ impl TlqClient {
 
         stream.write_all(request.as_bytes()).await?;
         stream.write_all(&json_body).await?;
+        stream.flush().await?;
 
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await?;
@@ -89,11 +91,13 @@ impl TlqClient {
         let request = format!(
             "GET /hello HTTP/1.1\r\n\
              Host: {}\r\n\
+             Connection: close\r\n\
              \r\n",
             self.base_url
         );
 
         stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
 
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await?;
@@ -110,8 +114,8 @@ impl TlqClient {
         }
 
         let request = AddMessageRequest { body };
-        let response: AddMessageResponse = self.request("/add", &request).await?;
-        Ok(response.message)
+        let message: Message = self.request("/add", &request).await?;
+        Ok(message)
     }
 
     pub async fn get_messages(&self, count: u32) -> Result<Vec<Message>> {
@@ -122,8 +126,8 @@ impl TlqClient {
         }
 
         let request = GetMessagesRequest { count };
-        let response: GetMessagesResponse = self.request("/get", &request).await?;
-        Ok(response.messages)
+        let messages: Vec<Message> = self.request("/get", &request).await?;
+        Ok(messages)
     }
 
     pub async fn get_message(&self) -> Result<Option<Message>> {
@@ -131,37 +135,37 @@ impl TlqClient {
         Ok(messages.into_iter().next())
     }
 
-    pub async fn delete_message(&self, id: Uuid) -> Result<u32> {
+    pub async fn delete_message(&self, id: Uuid) -> Result<String> {
         self.delete_messages(&[id]).await
     }
 
-    pub async fn delete_messages(&self, ids: &[Uuid]) -> Result<u32> {
+    pub async fn delete_messages(&self, ids: &[Uuid]) -> Result<String> {
         if ids.is_empty() {
             return Err(TlqError::Validation("No message IDs provided".to_string()));
         }
 
         let request = DeleteMessagesRequest { ids: ids.to_vec() };
-        let response: DeleteMessagesResponse = self.request("/delete", &request).await?;
-        Ok(response.deleted_count)
+        let response: String = self.request("/delete", &request).await?;
+        Ok(response)
     }
 
-    pub async fn retry_message(&self, id: Uuid) -> Result<u32> {
+    pub async fn retry_message(&self, id: Uuid) -> Result<String> {
         self.retry_messages(&[id]).await
     }
 
-    pub async fn retry_messages(&self, ids: &[Uuid]) -> Result<u32> {
+    pub async fn retry_messages(&self, ids: &[Uuid]) -> Result<String> {
         if ids.is_empty() {
             return Err(TlqError::Validation("No message IDs provided".to_string()));
         }
 
         let request = RetryMessagesRequest { ids: ids.to_vec() };
-        let response: RetryMessagesResponse = self.request("/retry", &request).await?;
-        Ok(response.retry_count)
+        let response: String = self.request("/retry", &request).await?;
+        Ok(response)
     }
 
-    pub async fn purge_queue(&self) -> Result<u32> {
-        let response: PurgeQueueResponse = self.request("/purge", &serde_json::json!({})).await?;
-        Ok(response.purged_count)
+    pub async fn purge_queue(&self) -> Result<String> {
+        let response: String = self.request("/purge", &serde_json::json!({})).await?;
+        Ok(response)
     }
 
     // Helper function to parse HTTP response - extracted for testing

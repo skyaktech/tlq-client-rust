@@ -6,6 +6,8 @@ pub struct Message {
     pub id: Uuid,
     pub body: String,
     pub state: MessageState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_until: Option<String>, // ISO datetime string
     pub retry_count: u32,
 }
 
@@ -23,6 +25,7 @@ impl Message {
             id: Uuid::now_v7(),
             body,
             state: MessageState::Ready,
+            lock_until: None,
             retry_count: 0,
         }
     }
@@ -33,19 +36,9 @@ pub struct AddMessageRequest {
     pub body: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AddMessageResponse {
-    pub message: Message,
-}
-
 #[derive(Debug, Serialize)]
 pub struct GetMessagesRequest {
     pub count: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GetMessagesResponse {
-    pub messages: Vec<Message>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,29 +46,9 @@ pub struct DeleteMessagesRequest {
     pub ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DeleteMessagesResponse {
-    pub deleted_count: u32,
-}
-
 #[derive(Debug, Serialize)]
 pub struct RetryMessagesRequest {
     pub ids: Vec<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RetryMessagesResponse {
-    pub retry_count: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PurgeQueueResponse {
-    pub purged_count: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HealthCheckResponse {
-    pub status: String,
 }
 
 #[cfg(test)]
@@ -218,61 +191,55 @@ mod tests {
 
     #[test]
     fn test_response_deserialization() {
-        // Test AddMessageResponse
-        let message = Message::new("test".to_string());
-        let add_resp_json = format!(
-            r#"{{"message":{{"id":"{}","body":"{}","state":"Ready","retry_count":0}}}}"#,
-            message.id, message.body
-        );
-        let add_resp: AddMessageResponse = serde_json::from_str(&add_resp_json).unwrap();
-        assert_eq!(add_resp.message.body, "test");
+        // Test direct Message response (for add_message)
+        let message_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test","state":"Ready","lock_until":null,"retry_count":0}"#;
+        let message: Message = serde_json::from_str(&message_json).unwrap();
+        assert_eq!(message.body, "test");
+        assert_eq!(message.state, MessageState::Ready);
+        assert_eq!(message.retry_count, 0);
+        assert_eq!(message.lock_until, None);
 
-        // Test GetMessagesResponse
-        let get_resp_json = r#"{"messages":[]}"#;
-        let get_resp: GetMessagesResponse = serde_json::from_str(&get_resp_json).unwrap();
-        assert!(get_resp.messages.is_empty());
+        // Test array of messages response (for get_messages)
+        let messages_json = r#"[{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test1","state":"Processing","lock_until":null,"retry_count":1}]"#;
+        let messages: Vec<Message> = serde_json::from_str(&messages_json).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "test1");
+        assert_eq!(messages[0].state, MessageState::Processing);
 
-        // Test DeleteMessagesResponse
-        let delete_resp_json = r#"{"deleted_count":3}"#;
-        let delete_resp: DeleteMessagesResponse = serde_json::from_str(&delete_resp_json).unwrap();
-        assert_eq!(delete_resp.deleted_count, 3);
+        // Test success string responses (for delete/retry/purge)
+        let success_response: String = serde_json::from_str(r#""Success""#).unwrap();
+        assert_eq!(success_response, "Success");
 
-        // Test RetryMessagesResponse
-        let retry_resp_json = r#"{"retry_count":2}"#;
-        let retry_resp: RetryMessagesResponse = serde_json::from_str(&retry_resp_json).unwrap();
-        assert_eq!(retry_resp.retry_count, 2);
-
-        // Test PurgeQueueResponse
-        let purge_resp_json = r#"{"purged_count":10}"#;
-        let purge_resp: PurgeQueueResponse = serde_json::from_str(&purge_resp_json).unwrap();
-        assert_eq!(purge_resp.purged_count, 10);
-
-        // Test HealthCheckResponse
-        let health_resp_json = r#"{"status":"OK"}"#;
-        let health_resp: HealthCheckResponse = serde_json::from_str(&health_resp_json).unwrap();
-        assert_eq!(health_resp.status, "OK");
+        // Test health check response
+        let health_response: String = serde_json::from_str(r#""Hello World""#).unwrap();
+        assert_eq!(health_response, "Hello World");
     }
 
     #[test]
     fn test_malformed_response_deserialization() {
         // Test that malformed JSON fails gracefully
-        let malformed_json = r#"{"message": invalid}"#;
-        let result = serde_json::from_str::<AddMessageResponse>(&malformed_json);
+        let malformed_json = r#"{"id": invalid}"#;
+        let result = serde_json::from_str::<Message>(&malformed_json);
         assert!(result.is_err());
 
-        // Test missing required fields
-        let incomplete_json = r#"{"deleted_count":}"#; // Missing value
-        let result = serde_json::from_str::<DeleteMessagesResponse>(&incomplete_json);
+        // Test missing required fields in Message
+        let incomplete_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test"}"#; // Missing state and retry_count
+        let result = serde_json::from_str::<Message>(&incomplete_json);
         assert!(result.is_err());
 
-        // Test wrong field types in responses
-        let wrong_type_json = r#"{"deleted_count":"not_a_number"}"#;
-        let result = serde_json::from_str::<DeleteMessagesResponse>(&wrong_type_json);
+        // Test wrong field types in Message
+        let wrong_type_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"test","state":"Ready","retry_count":"not_a_number"}"#;
+        let result = serde_json::from_str::<Message>(&wrong_type_json);
         assert!(result.is_err());
 
-        // Test malformed message in response
-        let bad_message_json = r#"{"message":{"id":"invalid-uuid","body":"test","state":"Ready","retry_count":0}}"#;
-        let result = serde_json::from_str::<AddMessageResponse>(&bad_message_json);
+        // Test malformed message with invalid UUID
+        let bad_uuid_json = r#"{"id":"invalid-uuid","body":"test","state":"Ready","lock_until":null,"retry_count":0}"#;
+        let result = serde_json::from_str::<Message>(&bad_uuid_json);
         assert!(result.is_err()); // Should fail due to invalid UUID
+
+        // Test malformed array
+        let bad_array_json = r#"[{"id":"invalid"}]"#;
+        let result = serde_json::from_str::<Vec<Message>>(&bad_array_json);
+        assert!(result.is_err());
     }
 }
