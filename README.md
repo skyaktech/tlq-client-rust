@@ -4,12 +4,12 @@ A high-performance, async Rust client for [TLQ (Tiny Little Queue)](https://gith
 
 ## Features
 
-- =€ **Async/await support** with Tokio
-- = **Automatic retry** with exponential backoff
-- <× **Builder pattern** for flexible configuration
-- <¯ **Type-safe** message handling
-- =æ **Zero external dependencies** (only tokio, serde, uuid, thiserror)
-- ¡ **High performance** with minimal overhead
+- **Async/await support** with Tokio
+- **Automatic retry** with exponential backoff
+- **Builder pattern** for flexible configuration
+- **Type-safe** message handling
+- **Zero external dependencies** (only tokio, serde, uuid, thiserror)
+- **High performance** with minimal overhead
 
 ## Installation
 
