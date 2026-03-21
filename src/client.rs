@@ -182,6 +182,45 @@ impl TlqClient {
         serde_json::from_str(body).map_err(Into::into)
     }
 
+    async fn get_request<R>(&self, endpoint: &str) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let retry_strategy = RetryStrategy::new(self.config.max_retries, self.config.retry_delay);
+
+        retry_strategy
+            .execute(|| async { self.single_get_request(endpoint).await })
+            .await
+    }
+
+    async fn single_get_request<R>(&self, endpoint: &str) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let request = format!(
+            "GET {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            endpoint, self.base_url,
+        );
+
+        let mut stream = timeout(self.config.timeout, TcpStream::connect(&self.base_url))
+            .await
+            .map_err(|_| TlqError::Timeout(self.config.timeout.as_millis() as u64))?
+            .map_err(|e| TlqError::Connection(e.to_string()))?;
+
+        stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+
+        let response_str = String::from_utf8_lossy(&response);
+        let body = Self::parse_http_response(&response_str)?;
+        serde_json::from_str(body).map_err(Into::into)
+    }
+
     /// Performs a health check against the TLQ server.
     ///
     /// This method sends a GET request to the `/hello` endpoint to verify
@@ -611,6 +650,41 @@ impl TlqClient {
     pub async fn purge_queue(&self) -> Result<String> {
         let response: String = self.request("/purge", &serde_json::json!({})).await?;
         Ok(response)
+    }
+
+    /// Retrieves queue statistics from the TLQ server.
+    ///
+    /// Returns counts of messages in each state (ready, processing) and
+    /// the cumulative count of dead messages removed by the reaper.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`QueueStats`] with the current queue statistics.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     let stats = client.stats().await?;
+    ///     println!("Ready: {}, Processing: {}, Dead: {}",
+    ///         stats.ready, stats.processing, stats.dead);
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
+    pub async fn stats(&self) -> Result<QueueStats> {
+        self.get_request("/stats").await
     }
 
     // Helper function to parse HTTP response - extracted for testing
