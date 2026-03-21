@@ -24,9 +24,9 @@ pub struct Message {
     pub body: String,
     /// Current processing state of the message
     pub state: MessageState,
-    /// Optional ISO datetime string indicating when the message lock expires
+    /// Unix timestamp in milliseconds indicating when the message lock expires
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lock_until: Option<String>, // ISO datetime string
+    pub lock_until: Option<u64>,
     /// Number of times this message has been retried after failure
     pub retry_count: u32,
 }
@@ -277,6 +277,12 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].body, "test1");
         assert_eq!(messages[0].state, MessageState::Processing);
+
+        // Test message with numeric lock_until (Unix timestamp ms)
+        let locked_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"locked","state":"Processing","lock_until":1700000000000,"retry_count":1}"#;
+        let locked: Message = serde_json::from_str(locked_json).unwrap();
+        assert_eq!(locked.lock_until, Some(1700000000000u64));
+        assert_eq!(locked.state, MessageState::Processing);
 
         // Test success string responses (for delete/retry/purge)
         let success_response: String = serde_json::from_str(r#""Success""#).unwrap();
