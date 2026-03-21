@@ -103,10 +103,8 @@ mod message_tests {
     fn test_message_state() {
         let ready = MessageState::Ready;
         let processing = MessageState::Processing;
-        let failed = MessageState::Failed;
 
         assert_eq!(ready, MessageState::Ready);
         assert_ne!(ready, processing);
-        assert_ne!(processing, failed);
     }
 }

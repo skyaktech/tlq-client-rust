@@ -484,11 +484,11 @@ impl TlqClient {
         Ok(response)
     }
 
-    /// Retries a single failed message on the TLQ server.
+    /// Retries a single message on the TLQ server.
     ///
     /// This is a convenience method that calls [`retry_messages`](Self::retry_messages)
-    /// with a single message ID. The message state will be changed from
-    /// [`MessageState::Failed`] back to [`MessageState::Ready`].
+    /// with a single message ID. The message state will be changed back to
+    /// [`MessageState::Ready`], making it available for processing again.
     ///
     /// # Arguments
     ///
@@ -496,26 +496,23 @@ impl TlqClient {
     ///
     /// # Returns
     ///
-    /// Returns a string indicating the result of the operation (typically "Success" or a count).
+    /// Returns a string indicating the result of the operation (typically "Success").
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use tlq_client::{TlqClient, MessageState};
+    /// use tlq_client::TlqClient;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), tlq_client::TlqError> {
     ///     let client = TlqClient::new("localhost", 1337)?;
     ///
-    ///     // Find failed messages and retry them
-    ///     let messages = client.get_messages(10).await?;
-    ///     for message in messages {
-    ///         if message.state == MessageState::Failed {
-    ///             let result = client.retry_message(message.id).await?;
-    ///             println!("Retry result: {}", result);
-    ///         }
+    ///     if let Some(message) = client.get_message().await? {
+    ///         // Processing failed, retry the message
+    ///         let result = client.retry_message(message.id).await?;
+    ///         println!("Retry result: {}", result);
     ///     }
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -529,10 +526,10 @@ impl TlqClient {
         self.retry_messages(&[id]).await
     }
 
-    /// Retries multiple failed messages on the TLQ server.
+    /// Retries multiple messages on the TLQ server.
     ///
-    /// This method changes the state of the specified messages from [`MessageState::Failed`]
-    /// back to [`MessageState::Ready`], making them available for processing again.
+    /// This method changes the state of the specified messages back to
+    /// [`MessageState::Ready`], making them available for processing again.
     /// The retry count for each message will be incremented.
     ///
     /// # Arguments
@@ -541,30 +538,25 @@ impl TlqClient {
     ///
     /// # Returns
     ///
-    /// Returns a string indicating the number of messages retried or "Success".
+    /// Returns a string indicating the result of the operation (typically "Success").
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use tlq_client::{TlqClient, MessageState};
+    /// use tlq_client::TlqClient;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), tlq_client::TlqError> {
     ///     let client = TlqClient::new("localhost", 1337)?;
     ///
-    ///     // Get all messages and retry the failed ones
-    ///     let messages = client.get_messages(100).await?;
-    ///     let failed_ids: Vec<_> = messages
-    ///         .iter()
-    ///         .filter(|m| m.state == MessageState::Failed)
-    ///         .map(|m| m.id)
-    ///         .collect();
+    ///     let messages = client.get_messages(10).await?;
+    ///     let ids: Vec<_> = messages.iter().map(|m| m.id).collect();
     ///
-    ///     if !failed_ids.is_empty() {
-    ///         let result = client.retry_messages(&failed_ids).await?;
-    ///         println!("Retried {} failed messages", result);
+    ///     if !ids.is_empty() {
+    ///         let result = client.retry_messages(&ids).await?;
+    ///         println!("Retry result: {}", result);
     ///     }
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```

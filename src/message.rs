@@ -35,13 +35,15 @@ pub struct Message {
 ///
 /// Messages transition through these states as they are processed:
 /// - `Ready` → `Processing` (when retrieved by a consumer)
-/// - `Processing` → `Failed` (if processing fails)
-/// - `Failed` → `Ready` (when retried)
+/// - `Processing` → `Ready` (when retried)
 /// - Any state → deleted (when explicitly deleted)
+///
+/// Messages that exceed the server's max retry limit are automatically
+/// removed by the background reaper and counted as "dead" in queue statistics.
 ///
 /// # Serialization
 ///
-/// States are serialized in PascalCase format ("Ready", "Processing", "Failed")
+/// States are serialized in PascalCase format ("Ready", "Processing")
 /// to match the TLQ server API expectations.
 ///
 /// # Examples
@@ -59,8 +61,6 @@ pub enum MessageState {
     Ready,
     /// Message is currently being processed by a consumer
     Processing,
-    /// Message processing failed and may need to be retried
-    Failed,
 }
 
 impl Message {
@@ -152,10 +152,6 @@ mod tests {
             serde_json::to_string(&MessageState::Processing).unwrap(),
             "\"Processing\""
         );
-        assert_eq!(
-            serde_json::to_string(&MessageState::Failed).unwrap(),
-            "\"Failed\""
-        );
     }
 
     #[test]
@@ -168,10 +164,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MessageState>("\"Processing\"").unwrap(),
             MessageState::Processing
-        );
-        assert_eq!(
-            serde_json::from_str::<MessageState>("\"Failed\"").unwrap(),
-            MessageState::Failed
         );
     }
 
