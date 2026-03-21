@@ -98,6 +98,20 @@ impl Message {
     }
 }
 
+/// Represents queue statistics returned by the TLQ server.
+///
+/// Provides counts of messages in each state, plus the cumulative count of
+/// dead messages (those removed by the reaper after exceeding max retries).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueueStats {
+    /// Number of messages in Ready state
+    pub ready: u64,
+    /// Number of messages currently being processed
+    pub processing: u64,
+    /// Cumulative count of messages removed after exceeding max retries
+    pub dead: u64,
+}
+
 // Internal request structures for TLQ API communication
 
 /// Request structure for adding a message to the queue
@@ -319,5 +333,26 @@ mod tests {
         let bad_array_json = r#"[{"id":"invalid"}]"#;
         let result = serde_json::from_str::<Vec<Message>>(bad_array_json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_queue_stats_deserialization() {
+        let json = r#"{"ready":10,"processing":5,"dead":2}"#;
+        let stats: QueueStats = serde_json::from_str(json).unwrap();
+        assert_eq!(stats.ready, 10);
+        assert_eq!(stats.processing, 5);
+        assert_eq!(stats.dead, 2);
+    }
+
+    #[test]
+    fn test_queue_stats_serialization() {
+        let stats = QueueStats {
+            ready: 3,
+            processing: 1,
+            dead: 0,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: QueueStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, deserialized);
     }
 }
