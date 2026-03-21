@@ -12,6 +12,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    println!("\nChecking queue stats...");
+    let stats = client.stats().await?;
+    println!(
+        "Queue stats - Ready: {}, Processing: {}, Dead: {}",
+        stats.ready, stats.processing, stats.dead
+    );
+
     println!("\nAdding a message to the queue...");
     let message = client.add_message("Hello, TLQ!").await?;
     println!("Added message with ID: {}", message.id);
