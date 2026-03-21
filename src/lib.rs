@@ -48,20 +48,17 @@
 //! Use [`ConfigBuilder`] for advanced configuration:
 //!
 //! ```no_run
-//! use tlq_client::{TlqClient, ConfigBuilder};
+//! use tlq_client::TlqClient;
 //! use std::time::Duration;
 //!
-//! # async fn example() -> Result<(), tlq_client::TlqError> {
-//! let client = TlqClient::with_config(
-//!     ConfigBuilder::new()
-//!         .host("queue.example.com")
-//!         .port(8080)
-//!         .timeout(Duration::from_secs(10))
-//!         .max_retries(5)
-//!         .retry_delay(Duration::from_millis(200))
-//!         .build()
-//! );
-//! # Ok(())
+//! # fn example() {
+//! let client = TlqClient::builder()
+//!     .host("queue.example.com")
+//!     .port(8080)
+//!     .timeout(Duration::from_secs(10))
+//!     .max_retries(5)
+//!     .retry_delay(Duration::from_millis(200))
+//!     .build();
 //! # }
 //! ```
 

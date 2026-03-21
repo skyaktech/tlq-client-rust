@@ -8,15 +8,13 @@ async fn test_client_creation() {
 
 #[tokio::test]
 async fn test_client_builder() {
-    let client = TlqClient::builder()
+    let _client = TlqClient::builder()
         .host("localhost")
         .port(1337)
         .timeout_ms(5000)
         .max_retries(3)
         .retry_delay_ms(100)
         .build();
-
-    let _client = TlqClient::with_config(client);
 }
 
 #[tokio::test]
@@ -65,7 +63,7 @@ mod config_tests {
             .timeout(Duration::from_secs(10))
             .max_retries(5)
             .retry_delay(Duration::from_millis(200))
-            .build();
+            .build_config();
 
         assert_eq!(config.host, "example.com");
         assert_eq!(config.port, 8080);
@@ -76,7 +74,7 @@ mod config_tests {
 
     #[test]
     fn test_config_default() {
-        let config = ConfigBuilder::new().build();
+        let config = ConfigBuilder::new().build_config();
 
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 1337);

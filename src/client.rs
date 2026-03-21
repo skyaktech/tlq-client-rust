@@ -74,9 +74,7 @@ impl TlqClient {
     /// Currently this method always returns `Ok`, but the `Result` is preserved
     /// for future compatibility.
     pub fn new(host: impl Into<String>, port: u16) -> Result<Self> {
-        let config = ConfigBuilder::new().host(host).port(port).build();
-
-        Ok(Self::with_config(config))
+        Ok(ConfigBuilder::new().host(host).port(port).build())
     }
 
     /// Creates a new TLQ client with custom configuration.
@@ -91,17 +89,10 @@ impl TlqClient {
     /// # Examples
     ///
     /// ```no_run
-    /// use tlq_client::{TlqClient, ConfigBuilder};
-    /// use std::time::Duration;
+    /// use tlq_client::{TlqClient, Config};
     ///
     /// # fn example() {
-    /// let config = ConfigBuilder::new()
-    ///     .host("queue.example.com")
-    ///     .port(8080)
-    ///     .timeout(Duration::from_secs(5))
-    ///     .max_retries(2)
-    ///     .build();
-    ///
+    /// let config = Config::default();
     /// let client = TlqClient::with_config(config);
     /// # }
     /// ```
@@ -121,13 +112,11 @@ impl TlqClient {
     /// use std::time::Duration;
     ///
     /// # fn example() {
-    /// let client = TlqClient::with_config(
-    ///     TlqClient::builder()
-    ///         .host("localhost")
-    ///         .port(1337)
-    ///         .timeout(Duration::from_secs(10))
-    ///         .build()
-    /// );
+    /// let client = TlqClient::builder()
+    ///     .host("localhost")
+    ///     .port(1337)
+    ///     .timeout(Duration::from_secs(10))
+    ///     .build();
     /// # }
     /// ```
     pub fn builder() -> ConfigBuilder {
@@ -956,7 +945,7 @@ mod tests {
     #[test]
     fn test_client_builder_edge_cases() {
         // Test builder with minimum values
-        let config = TlqClient::builder()
+        let client = TlqClient::builder()
             .host("")
             .port(0)
             .timeout_ms(0)
@@ -964,13 +953,12 @@ mod tests {
             .retry_delay_ms(0)
             .build();
 
-        let client = TlqClient::with_config(config);
         assert_eq!(client.base_url, ":0");
         assert_eq!(client.config.max_retries, 0);
         assert_eq!(client.config.timeout, Duration::from_millis(0));
 
         // Test builder with maximum reasonable values
-        let config = TlqClient::builder()
+        let client = TlqClient::builder()
             .host("very-long-hostname-that-might-be-used-in-some-environments")
             .port(65535)
             .timeout_ms(600000) // 10 minutes
@@ -978,7 +966,6 @@ mod tests {
             .retry_delay_ms(10000) // 10 seconds
             .build();
 
-        let client = TlqClient::with_config(config);
         assert!(client.base_url.contains("very-long-hostname"));
         assert_eq!(client.config.max_retries, 100);
         assert_eq!(client.config.timeout, Duration::from_secs(600));
@@ -992,23 +979,23 @@ mod tests {
         // Test various duration configurations
         let config1 = ConfigBuilder::new()
             .timeout(Duration::from_nanos(1))
-            .build();
+            .build_config();
         assert_eq!(config1.timeout, Duration::from_nanos(1));
 
         let config2 = ConfigBuilder::new()
             .retry_delay(Duration::from_secs(3600)) // 1 hour
-            .build();
+            .build_config();
         assert_eq!(config2.retry_delay, Duration::from_secs(3600));
 
         // Test edge case ports
-        let config3 = ConfigBuilder::new().port(1).build();
+        let config3 = ConfigBuilder::new().port(1).build_config();
         assert_eq!(config3.port, 1);
 
-        let config4 = ConfigBuilder::new().port(65535).build();
+        let config4 = ConfigBuilder::new().port(65535).build_config();
         assert_eq!(config4.port, 65535);
 
         // Test very high retry counts
-        let config5 = ConfigBuilder::new().max_retries(1000).build();
+        let config5 = ConfigBuilder::new().max_retries(1000).build_config();
         assert_eq!(config5.max_retries, 1000);
     }
 }
