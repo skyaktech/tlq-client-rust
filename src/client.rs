@@ -74,9 +74,7 @@ impl TlqClient {
     /// Currently this method always returns `Ok`, but the `Result` is preserved
     /// for future compatibility.
     pub fn new(host: impl Into<String>, port: u16) -> Result<Self> {
-        let config = ConfigBuilder::new().host(host).port(port).build();
-
-        Ok(Self::with_config(config))
+        Ok(ConfigBuilder::new().host(host).port(port).build())
     }
 
     /// Creates a new TLQ client with custom configuration.
@@ -91,17 +89,10 @@ impl TlqClient {
     /// # Examples
     ///
     /// ```no_run
-    /// use tlq_client::{TlqClient, ConfigBuilder};
-    /// use std::time::Duration;
+    /// use tlq_client::{TlqClient, Config};
     ///
     /// # fn example() {
-    /// let config = ConfigBuilder::new()
-    ///     .host("queue.example.com")
-    ///     .port(8080)
-    ///     .timeout(Duration::from_secs(5))
-    ///     .max_retries(2)
-    ///     .build();
-    ///
+    /// let config = Config::default();
     /// let client = TlqClient::with_config(config);
     /// # }
     /// ```
@@ -121,13 +112,11 @@ impl TlqClient {
     /// use std::time::Duration;
     ///
     /// # fn example() {
-    /// let client = TlqClient::with_config(
-    ///     TlqClient::builder()
-    ///         .host("localhost")
-    ///         .port(1337)
-    ///         .timeout(Duration::from_secs(10))
-    ///         .build()
-    /// );
+    /// let client = TlqClient::builder()
+    ///     .host("localhost")
+    ///     .port(1337)
+    ///     .timeout(Duration::from_secs(10))
+    ///     .build();
     /// # }
     /// ```
     pub fn builder() -> ConfigBuilder {
@@ -172,6 +161,45 @@ impl TlqClient {
 
         stream.write_all(request.as_bytes()).await?;
         stream.write_all(&json_body).await?;
+        stream.flush().await?;
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+
+        let response_str = String::from_utf8_lossy(&response);
+        let body = Self::parse_http_response(&response_str)?;
+        serde_json::from_str(body).map_err(Into::into)
+    }
+
+    async fn get_request<R>(&self, endpoint: &str) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let retry_strategy = RetryStrategy::new(self.config.max_retries, self.config.retry_delay);
+
+        retry_strategy
+            .execute(|| async { self.single_get_request(endpoint).await })
+            .await
+    }
+
+    async fn single_get_request<R>(&self, endpoint: &str) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let request = format!(
+            "GET {} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            endpoint, self.base_url,
+        );
+
+        let mut stream = timeout(self.config.timeout, TcpStream::connect(&self.base_url))
+            .await
+            .map_err(|_| TlqError::Timeout(self.config.timeout.as_millis() as u64))?
+            .map_err(|e| TlqError::Connection(e.to_string()))?;
+
+        stream.write_all(request.as_bytes()).await?;
         stream.flush().await?;
 
         let mut response = Vec::new();
@@ -484,11 +512,11 @@ impl TlqClient {
         Ok(response)
     }
 
-    /// Retries a single failed message on the TLQ server.
+    /// Retries a single message on the TLQ server.
     ///
     /// This is a convenience method that calls [`retry_messages`](Self::retry_messages)
-    /// with a single message ID. The message state will be changed from
-    /// [`MessageState::Failed`] back to [`MessageState::Ready`].
+    /// with a single message ID. The message state will be changed back to
+    /// [`MessageState::Ready`], making it available for processing again.
     ///
     /// # Arguments
     ///
@@ -496,26 +524,23 @@ impl TlqClient {
     ///
     /// # Returns
     ///
-    /// Returns a string indicating the result of the operation (typically "Success" or a count).
+    /// Returns a string indicating the result of the operation (typically "Success").
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use tlq_client::{TlqClient, MessageState};
+    /// use tlq_client::TlqClient;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), tlq_client::TlqError> {
     ///     let client = TlqClient::new("localhost", 1337)?;
     ///
-    ///     // Find failed messages and retry them
-    ///     let messages = client.get_messages(10).await?;
-    ///     for message in messages {
-    ///         if message.state == MessageState::Failed {
-    ///             let result = client.retry_message(message.id).await?;
-    ///             println!("Retry result: {}", result);
-    ///         }
+    ///     if let Some(message) = client.get_message().await? {
+    ///         // Processing failed, retry the message
+    ///         let result = client.retry_message(message.id).await?;
+    ///         println!("Retry result: {}", result);
     ///     }
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -529,10 +554,10 @@ impl TlqClient {
         self.retry_messages(&[id]).await
     }
 
-    /// Retries multiple failed messages on the TLQ server.
+    /// Retries multiple messages on the TLQ server.
     ///
-    /// This method changes the state of the specified messages from [`MessageState::Failed`]
-    /// back to [`MessageState::Ready`], making them available for processing again.
+    /// This method changes the state of the specified messages back to
+    /// [`MessageState::Ready`], making them available for processing again.
     /// The retry count for each message will be incremented.
     ///
     /// # Arguments
@@ -541,30 +566,25 @@ impl TlqClient {
     ///
     /// # Returns
     ///
-    /// Returns a string indicating the number of messages retried or "Success".
+    /// Returns a string indicating the result of the operation (typically "Success").
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use tlq_client::{TlqClient, MessageState};
+    /// use tlq_client::TlqClient;
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), tlq_client::TlqError> {
     ///     let client = TlqClient::new("localhost", 1337)?;
     ///
-    ///     // Get all messages and retry the failed ones
-    ///     let messages = client.get_messages(100).await?;
-    ///     let failed_ids: Vec<_> = messages
-    ///         .iter()
-    ///         .filter(|m| m.state == MessageState::Failed)
-    ///         .map(|m| m.id)
-    ///         .collect();
+    ///     let messages = client.get_messages(10).await?;
+    ///     let ids: Vec<_> = messages.iter().map(|m| m.id).collect();
     ///
-    ///     if !failed_ids.is_empty() {
-    ///         let result = client.retry_messages(&failed_ids).await?;
-    ///         println!("Retried {} failed messages", result);
+    ///     if !ids.is_empty() {
+    ///         let result = client.retry_messages(&ids).await?;
+    ///         println!("Retry result: {}", result);
     ///     }
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -619,6 +639,41 @@ impl TlqClient {
     pub async fn purge_queue(&self) -> Result<String> {
         let response: String = self.request("/purge", &serde_json::json!({})).await?;
         Ok(response)
+    }
+
+    /// Retrieves queue statistics from the TLQ server.
+    ///
+    /// Returns counts of messages in each state (ready, processing) and
+    /// the cumulative count of dead messages removed by the reaper.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`QueueStats`] with the current queue statistics.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), tlq_client::TlqError> {
+    ///     let client = TlqClient::new("localhost", 1337)?;
+    ///
+    ///     let stats = client.stats().await?;
+    ///     println!("Ready: {}, Processing: {}, Dead: {}",
+    ///         stats.ready, stats.processing, stats.dead);
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// * [`TlqError::Connection`] for network connectivity issues
+    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
+    pub async fn stats(&self) -> Result<QueueStats> {
+        self.get_request("/stats").await
     }
 
     // Helper function to parse HTTP response - extracted for testing
@@ -890,7 +945,7 @@ mod tests {
     #[test]
     fn test_client_builder_edge_cases() {
         // Test builder with minimum values
-        let config = TlqClient::builder()
+        let client = TlqClient::builder()
             .host("")
             .port(0)
             .timeout_ms(0)
@@ -898,13 +953,12 @@ mod tests {
             .retry_delay_ms(0)
             .build();
 
-        let client = TlqClient::with_config(config);
         assert_eq!(client.base_url, ":0");
         assert_eq!(client.config.max_retries, 0);
         assert_eq!(client.config.timeout, Duration::from_millis(0));
 
         // Test builder with maximum reasonable values
-        let config = TlqClient::builder()
+        let client = TlqClient::builder()
             .host("very-long-hostname-that-might-be-used-in-some-environments")
             .port(65535)
             .timeout_ms(600000) // 10 minutes
@@ -912,7 +966,6 @@ mod tests {
             .retry_delay_ms(10000) // 10 seconds
             .build();
 
-        let client = TlqClient::with_config(config);
         assert!(client.base_url.contains("very-long-hostname"));
         assert_eq!(client.config.max_retries, 100);
         assert_eq!(client.config.timeout, Duration::from_secs(600));
@@ -926,23 +979,23 @@ mod tests {
         // Test various duration configurations
         let config1 = ConfigBuilder::new()
             .timeout(Duration::from_nanos(1))
-            .build();
+            .build_config();
         assert_eq!(config1.timeout, Duration::from_nanos(1));
 
         let config2 = ConfigBuilder::new()
             .retry_delay(Duration::from_secs(3600)) // 1 hour
-            .build();
+            .build_config();
         assert_eq!(config2.retry_delay, Duration::from_secs(3600));
 
         // Test edge case ports
-        let config3 = ConfigBuilder::new().port(1).build();
+        let config3 = ConfigBuilder::new().port(1).build_config();
         assert_eq!(config3.port, 1);
 
-        let config4 = ConfigBuilder::new().port(65535).build();
+        let config4 = ConfigBuilder::new().port(65535).build_config();
         assert_eq!(config4.port, 65535);
 
         // Test very high retry counts
-        let config5 = ConfigBuilder::new().max_retries(1000).build();
+        let config5 = ConfigBuilder::new().max_retries(1000).build_config();
         assert_eq!(config5.max_retries, 1000);
     }
 }

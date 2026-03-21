@@ -18,7 +18,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tlq-client = "0.2"
+tlq-client = "0.4"
 ```
 
 ## Quick Start
@@ -63,8 +63,6 @@ let client = TlqClient::builder()
     .max_retries(3)
     .retry_delay_ms(100)
     .build();
-
-let client = TlqClient::with_config(client);
 ```
 
 ### Configuration Options
@@ -140,6 +138,14 @@ client.retry_message(message_id).await?;
 
 // Retry multiple messages
 client.retry_messages(&[id1, id2, id3]).await?;
+```
+
+#### `stats()`
+Retrieve queue statistics (ready, processing, dead counts).
+
+```rust
+let stats = client.stats().await?;
+println!("Ready: {}, Processing: {}, Dead: {}", stats.ready, stats.processing, stats.dead);
 ```
 
 #### `purge_queue()`
@@ -284,3 +290,4 @@ This project is licensed under the MIT License - see the [LICENSE-MIT](LICENSE-M
 - [TLQ Node.js Client](https://github.com/skyaktech/tlq-client-node)
 - [TLQ Go Client](https://github.com/skyaktech/tlq-client-go)
 - [TLQ Python Client](https://github.com/skyaktech/tlq-client-py)
+- [TLQ Ruby Client](https://github.com/skyaktech/tlq-client-ruby)

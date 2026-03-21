@@ -1,3 +1,4 @@
+use crate::client::TlqClient;
 use std::time::Duration;
 
 /// Configuration settings for TLQ client connections.
@@ -30,7 +31,7 @@ use std::time::Duration;
 ///     .port(8080)
 ///     .timeout(Duration::from_secs(60))
 ///     .max_retries(5)
-///     .build();
+///     .build_config();
 /// ```
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -76,7 +77,7 @@ impl Default for Config {
 ///     .timeout_ms(5000)          // 5 second timeout
 ///     .max_retries(2)            // Only retry twice
 ///     .retry_delay_ms(250)       // 250ms base delay
-///     .build();
+///     .build_config();
 ///
 /// assert_eq!(config.host, "queue.example.com");
 /// assert_eq!(config.port, 8080);
@@ -97,7 +98,7 @@ impl ConfigBuilder {
     /// use tlq_client::ConfigBuilder;
     ///
     /// let builder = ConfigBuilder::new();
-    /// let config = builder.build();
+    /// let _client = builder.build();
     /// ```
     pub fn new() -> Self {
         Self {
@@ -118,7 +119,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .host("queue.example.com")
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.host, "queue.example.com");
     /// ```
     pub fn host(mut self, host: impl Into<String>) -> Self {
@@ -139,7 +140,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .port(8080)
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.port, 8080);
     /// ```
     pub fn port(mut self, port: u16) -> Self {
@@ -161,7 +162,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .timeout(Duration::from_secs(60))
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.timeout, Duration::from_secs(60));
     /// ```
     pub fn timeout(mut self, timeout: Duration) -> Self {
@@ -185,7 +186,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .timeout_ms(5000)  // 5 seconds
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.timeout, Duration::from_millis(5000));
     /// ```
     pub fn timeout_ms(mut self, ms: u64) -> Self {
@@ -209,7 +210,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .max_retries(5)
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.max_retries, 5);
     /// ```
     pub fn max_retries(mut self, retries: u32) -> Self {
@@ -234,7 +235,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .retry_delay(Duration::from_millis(500))
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.retry_delay, Duration::from_millis(500));
     /// ```
     pub fn retry_delay(mut self, delay: Duration) -> Self {
@@ -258,7 +259,7 @@ impl ConfigBuilder {
     ///
     /// let config = ConfigBuilder::new()
     ///     .retry_delay_ms(200)  // 200ms base delay
-    ///     .build();
+    ///     .build_config();
     /// assert_eq!(config.retry_delay, Duration::from_millis(200));
     /// ```
     pub fn retry_delay_ms(mut self, ms: u64) -> Self {
@@ -266,10 +267,29 @@ impl ConfigBuilder {
         self
     }
 
-    /// Builds and returns the final [`Config`] instance.
+    /// Builds and returns a [`TlqClient`] instance.
     ///
-    /// Consumes the builder and returns a [`Config`] with all the
-    /// specified settings.
+    /// Consumes the builder and creates a client with the specified settings.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::ConfigBuilder;
+    ///
+    /// let client = ConfigBuilder::new()
+    ///     .host("localhost")
+    ///     .port(1337)
+    ///     .max_retries(3)
+    ///     .build();
+    /// ```
+    pub fn build(self) -> TlqClient {
+        TlqClient::with_config(self.config)
+    }
+
+    /// Builds and returns the [`Config`] instance without creating a client.
+    ///
+    /// Use this when you need the configuration object itself, for example
+    /// to pass to [`TlqClient::with_config`](crate::TlqClient::with_config).
     ///
     /// # Examples
     ///
@@ -279,11 +299,10 @@ impl ConfigBuilder {
     /// let config = ConfigBuilder::new()
     ///     .host("localhost")
     ///     .port(1337)
-    ///     .max_retries(3)
-    ///     .build();
-    /// // Use config...
+    ///     .build_config();
+    /// assert_eq!(config.host, "localhost");
     /// ```
-    pub fn build(self) -> Config {
+    pub fn build_config(self) -> Config {
         self.config
     }
 }

@@ -11,8 +11,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_retries(3)
         .build();
 
-    let client = TlqClient::with_config(client);
-
     println!("Starting worker, polling for messages...");
 
     loop {

@@ -24,9 +24,9 @@ pub struct Message {
     pub body: String,
     /// Current processing state of the message
     pub state: MessageState,
-    /// Optional ISO datetime string indicating when the message lock expires
+    /// Unix timestamp in milliseconds indicating when the message lock expires
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lock_until: Option<String>, // ISO datetime string
+    pub lock_until: Option<u64>,
     /// Number of times this message has been retried after failure
     pub retry_count: u32,
 }
@@ -35,13 +35,15 @@ pub struct Message {
 ///
 /// Messages transition through these states as they are processed:
 /// - `Ready` → `Processing` (when retrieved by a consumer)
-/// - `Processing` → `Failed` (if processing fails)
-/// - `Failed` → `Ready` (when retried)
+/// - `Processing` → `Ready` (when retried)
 /// - Any state → deleted (when explicitly deleted)
+///
+/// Messages that exceed the server's max retry limit are automatically
+/// removed by the background reaper and counted as "dead" in queue statistics.
 ///
 /// # Serialization
 ///
-/// States are serialized in PascalCase format ("Ready", "Processing", "Failed")
+/// States are serialized in PascalCase format ("Ready", "Processing")
 /// to match the TLQ server API expectations.
 ///
 /// # Examples
@@ -59,8 +61,6 @@ pub enum MessageState {
     Ready,
     /// Message is currently being processed by a consumer
     Processing,
-    /// Message processing failed and may need to be retried
-    Failed,
 }
 
 impl Message {
@@ -96,6 +96,20 @@ impl Message {
             retry_count: 0,
         }
     }
+}
+
+/// Represents queue statistics returned by the TLQ server.
+///
+/// Provides counts of messages in each state, plus the cumulative count of
+/// dead messages (those removed by the reaper after exceeding max retries).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueueStats {
+    /// Number of messages in Ready state
+    pub ready: u64,
+    /// Number of messages currently being processed
+    pub processing: u64,
+    /// Cumulative count of messages removed after exceeding max retries
+    pub dead: u64,
 }
 
 // Internal request structures for TLQ API communication
@@ -152,10 +166,6 @@ mod tests {
             serde_json::to_string(&MessageState::Processing).unwrap(),
             "\"Processing\""
         );
-        assert_eq!(
-            serde_json::to_string(&MessageState::Failed).unwrap(),
-            "\"Failed\""
-        );
     }
 
     #[test]
@@ -168,10 +178,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MessageState>("\"Processing\"").unwrap(),
             MessageState::Processing
-        );
-        assert_eq!(
-            serde_json::from_str::<MessageState>("\"Failed\"").unwrap(),
-            MessageState::Failed
         );
     }
 
@@ -286,6 +292,12 @@ mod tests {
         assert_eq!(messages[0].body, "test1");
         assert_eq!(messages[0].state, MessageState::Processing);
 
+        // Test message with numeric lock_until (Unix timestamp ms)
+        let locked_json = r#"{"id":"0198fbd8-344e-7b70-841f-3fbd4b371e4c","body":"locked","state":"Processing","lock_until":1700000000000,"retry_count":1}"#;
+        let locked: Message = serde_json::from_str(locked_json).unwrap();
+        assert_eq!(locked.lock_until, Some(1700000000000u64));
+        assert_eq!(locked.state, MessageState::Processing);
+
         // Test success string responses (for delete/retry/purge)
         let success_response: String = serde_json::from_str(r#""Success""#).unwrap();
         assert_eq!(success_response, "Success");
@@ -321,5 +333,26 @@ mod tests {
         let bad_array_json = r#"[{"id":"invalid"}]"#;
         let result = serde_json::from_str::<Vec<Message>>(bad_array_json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_queue_stats_deserialization() {
+        let json = r#"{"ready":10,"processing":5,"dead":2}"#;
+        let stats: QueueStats = serde_json::from_str(json).unwrap();
+        assert_eq!(stats.ready, 10);
+        assert_eq!(stats.processing, 5);
+        assert_eq!(stats.dead, 2);
+    }
+
+    #[test]
+    fn test_queue_stats_serialization() {
+        let stats = QueueStats {
+            ready: 3,
+            processing: 1,
+            dead: 0,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: QueueStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, deserialized);
     }
 }
