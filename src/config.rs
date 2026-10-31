@@ -42,11 +42,12 @@ pub struct Config {
     pub host: String,
     /// Port number of the TLQ server
     pub port: u16,
-    /// Maximum time to wait for a single request to complete
+    /// Maximum time for each request attempt, including connect, write, and read.
+    /// Retry delays are additional.
     pub timeout: Duration,
-    /// Maximum number of retry attempts for failed operations
+    /// Maximum retries when connecting fails. A sent request is never replayed.
     pub max_retries: u32,
-    /// Base delay between retry attempts (exponential backoff multiplier)
+    /// Base delay for exponential backoff. Actual retry delays are capped at 30 seconds.
     pub retry_delay: Duration,
     /// Maximum message body size in bytes, checked before sending.
     ///
@@ -157,7 +158,9 @@ impl ConfigBuilder {
         self
     }
 
-    /// Sets the request timeout duration.
+    /// Sets the timeout for each complete request attempt (connect, write, and read).
+    ///
+    /// Retry delays are additional.
     ///
     /// # Arguments
     ///
@@ -205,8 +208,8 @@ impl ConfigBuilder {
 
     /// Sets the maximum number of retry attempts.
     ///
-    /// When a retryable error occurs, the client will retry the operation
-    /// up to this many times before giving up.
+    /// Failed connection attempts are retried up to this many times with
+    /// exponential backoff. A request that has been sent is never replayed.
     ///
     /// # Arguments
     ///
@@ -230,7 +233,8 @@ impl ConfigBuilder {
     /// Sets the base retry delay duration.
     ///
     /// The actual delay between retries uses exponential backoff:
-    /// delay = base_delay × 2^attempt_number
+    /// delay = min(base_delay × 2^attempt_number, 30 seconds).
+    /// This cap also applies to base delays greater than 30 seconds.
     ///
     /// # Arguments
     ///

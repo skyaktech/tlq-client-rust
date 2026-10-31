@@ -6,17 +6,20 @@ use crate::{
     server_info::ServerInfo,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use uuid::Uuid;
 
 /// The main client for interacting with TLQ (Tiny Little Queue) servers.
 ///
 /// `TlqClient` provides an async, type-safe interface for all TLQ operations including
 /// adding messages, retrieving messages, and managing queue state. The client handles
-/// automatic retry with exponential backoff for transient failures.
+/// automatic retry with exponential backoff when connecting fails.
+///
+/// Once a request has been sent it is never replayed, because the server may already
+/// have applied it. Failures after sending a queue-changing request are reported as
+/// [`TlqError::OutcomeUnknown`].
 ///
 /// # Examples
 ///
@@ -122,26 +125,13 @@ impl TlqClient {
         ConfigBuilder::new()
     }
 
-    async fn request<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
+    async fn post<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
     where
         T: Serialize,
         R: DeserializeOwned,
     {
-        let retry_strategy = RetryStrategy::new(self.config.max_retries, self.config.retry_delay);
-
-        retry_strategy
-            .execute(|| async { self.single_request(endpoint, body).await })
-            .await
-    }
-
-    async fn single_request<T, R>(&self, endpoint: &str, body: &T) -> Result<R>
-    where
-        T: Serialize,
-        R: DeserializeOwned,
-    {
-        let json_body = serde_json::to_vec(body)?;
-
-        let request = format!(
+        let json = serde_json::to_vec(body)?;
+        let mut request = format!(
             "POST {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Content-Type: application/json\r\n\
@@ -150,38 +140,14 @@ impl TlqClient {
              \r\n",
             endpoint,
             self.base_url,
-            json_body.len()
-        );
-
-        let mut stream = timeout(self.config.timeout, TcpStream::connect(&self.base_url))
-            .await
-            .map_err(|_| TlqError::Timeout(self.config.timeout.as_millis() as u64))?
-            .map_err(|e| TlqError::Connection(e.to_string()))?;
-
-        stream.write_all(request.as_bytes()).await?;
-        stream.write_all(&json_body).await?;
-        stream.flush().await?;
-
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await?;
-
-        let response_str = String::from_utf8_lossy(&response);
-        let body = Self::parse_http_response(&response_str)?;
-        serde_json::from_str(body).map_err(Into::into)
+            json.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&json);
+        self.send(&request, true).await
     }
 
-    async fn get_request<R>(&self, endpoint: &str) -> Result<R>
-    where
-        R: DeserializeOwned,
-    {
-        let retry_strategy = RetryStrategy::new(self.config.max_retries, self.config.retry_delay);
-
-        retry_strategy
-            .execute(|| async { self.single_get_request(endpoint).await })
-            .await
-    }
-
-    async fn single_get_request<R>(&self, endpoint: &str) -> Result<R>
+    async fn get<R>(&self, endpoint: &str) -> Result<R>
     where
         R: DeserializeOwned,
     {
@@ -192,34 +158,70 @@ impl TlqClient {
              \r\n",
             endpoint, self.base_url,
         );
+        self.send(request.as_bytes(), false).await
+    }
 
-        let mut stream = timeout(self.config.timeout, TcpStream::connect(&self.base_url))
+    /// Sends one HTTP request and decodes the JSON response body.
+    ///
+    /// Only connecting is retried. Once the request is on the wire the server may
+    /// already have applied it, so the exchange runs exactly once. For queue-changing
+    /// requests, exchange failures are reported as [`TlqError::OutcomeUnknown`].
+    /// Each connect attempt plus the exchange share one `timeout` budget.
+    async fn send<R>(&self, request: &[u8], queue_changing: bool) -> Result<R>
+    where
+        R: DeserializeOwned,
+    {
+        let retry = RetryStrategy::new(self.config.max_retries, self.config.retry_delay);
+        let (mut stream, started) = retry
+            .execute(|| async {
+                let started = Instant::now();
+                let stream = timeout(self.config.timeout, TcpStream::connect(&self.base_url))
+                    .await
+                    .map_err(|_| self.timeout_error())?
+                    .map_err(|e| TlqError::Connection(e.to_string()))?;
+                Ok((stream, started))
+            })
+            .await?;
+
+        let exchange = async {
+            stream.write_all(request).await?;
+            stream.flush().await?;
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            let response = String::from_utf8_lossy(&response);
+            let body = Self::parse_http_response(&response)?;
+            serde_json::from_str(body).map_err(Into::into)
+        };
+        let remaining = self.config.timeout.saturating_sub(started.elapsed());
+        let result = timeout(remaining, exchange)
             .await
-            .map_err(|_| TlqError::Timeout(self.config.timeout.as_millis() as u64))?
-            .map_err(|e| TlqError::Connection(e.to_string()))?;
+            .unwrap_or_else(|_| Err(self.timeout_error()));
 
-        stream.write_all(request.as_bytes()).await?;
-        stream.flush().await?;
+        match result {
+            // An HTTP error status is a definite answer; anything else leaves the outcome open.
+            Err(cause) if queue_changing && !matches!(cause, TlqError::Server { .. }) => {
+                Err(TlqError::OutcomeUnknown {
+                    cause: Box::new(cause),
+                })
+            }
+            result => result,
+        }
+    }
 
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await?;
-
-        let response_str = String::from_utf8_lossy(&response);
-        let body = Self::parse_http_response(&response_str)?;
-        serde_json::from_str(body).map_err(Into::into)
+    fn timeout_error(&self) -> TlqError {
+        TlqError::Timeout(self.config.timeout.as_millis() as u64)
     }
 
     /// Performs a health check against the TLQ server.
     ///
-    /// This method sends a GET request to the `/hello` endpoint to verify
-    /// that the server is responding. It uses a fixed 5-second timeout
-    /// regardless of the client's configured timeout.
+    /// Sends a GET request to `/hello` using the client's configured timeout and
+    /// retry settings.
     ///
     /// # Returns
     ///
-    /// * `Ok(true)` if the server responds with HTTP 200 OK
-    /// * `Ok(false)` if the server responds but not with 200 OK
-    /// * `Err` if there's a connection error or timeout
+    /// * `Ok(true)` if the server answered with a greeting
+    /// * `Ok(false)` if the server answered with an HTTP error status
+    /// * `Err` for connection failures, timeouts, or an undecodable response
     ///
     /// # Examples
     ///
@@ -239,33 +241,12 @@ impl TlqClient {
     ///     Ok(())
     /// }
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TlqError::Connection`] for network issues, or [`TlqError::Timeout`]
-    /// if the server doesn't respond within 5 seconds.
     pub async fn health_check(&self) -> Result<bool> {
-        let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&self.base_url))
-            .await
-            .map_err(|_| TlqError::Timeout(5000))?
-            .map_err(|e| TlqError::Connection(e.to_string()))?;
-
-        let request = format!(
-            "GET /hello HTTP/1.1\r\n\
-             Host: {}\r\n\
-             Connection: close\r\n\
-             \r\n",
-            self.base_url
-        );
-
-        stream.write_all(request.as_bytes()).await?;
-        stream.flush().await?;
-
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).await?;
-
-        let response_str = String::from_utf8_lossy(&response);
-        Ok(response_str.contains("200 OK"))
+        match self.get::<String>("/hello").await {
+            Ok(_) => Ok(true),
+            Err(TlqError::Server { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Retrieves the server greeting, version, and uptime from `/hello`.
@@ -296,7 +277,7 @@ impl TlqClient {
     /// Returns network errors, [`TlqError::Server`] for HTTP 4xx/5xx responses,
     /// or [`TlqError::Serialization`] if the response is not a JSON string.
     pub async fn server_info(&self) -> Result<ServerInfo> {
-        let greeting = self.get_request("/hello").await?;
+        let greeting = self.get("/hello").await?;
         Ok(ServerInfo::from_greeting(greeting))
     }
 
@@ -338,18 +319,22 @@ impl TlqClient {
     /// # Errors
     ///
     /// * [`TlqError::MessageTooLarge`] if the message exceeds the configured byte limit
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn add_message(&self, body: impl Into<String>) -> Result<Message> {
         let body = body.into();
 
         if body.len() > self.config.max_message_size {
-            return Err(TlqError::MessageTooLarge { size: body.len() });
+            return Err(TlqError::MessageTooLarge {
+                size: body.len(),
+                limit: self.config.max_message_size,
+            });
         }
 
         let request = AddMessageRequest { body };
-        let message: Message = self.request("/add", &request).await?;
+        let message: Message = self.post("/add", &request).await?;
         Ok(message)
     }
 
@@ -397,8 +382,9 @@ impl TlqClient {
     /// # Errors
     ///
     /// * [`TlqError::Validation`] if count is 0
-    /// * [`TlqError::Connection`] for network connectivity issues  
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn get_messages(&self, count: u32) -> Result<Vec<Message>> {
         if count == 0 {
@@ -408,7 +394,7 @@ impl TlqClient {
         }
 
         let request = GetMessagesRequest { count };
-        let messages: Vec<Message> = self.request("/get", &request).await?;
+        let messages: Vec<Message> = self.post("/get", &request).await?;
         Ok(messages)
     }
 
@@ -421,7 +407,7 @@ impl TlqClient {
     ///
     /// * `Ok(Some(message))` if a message was retrieved
     /// * `Ok(None)` if no messages are available in the queue
-    /// * `Err` for connection or server errors
+    /// * `Err` for connection or server errors, or an unknown operation outcome
     ///
     /// # Examples
     ///
@@ -447,8 +433,9 @@ impl TlqClient {
     ///
     /// # Errors
     ///
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out  
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn get_message(&self) -> Result<Option<Message>> {
         let messages = self.get_messages(1).await?;
@@ -488,8 +475,9 @@ impl TlqClient {
     ///
     /// # Errors
     ///
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn delete_message(&self, id: Uuid) -> Result<String> {
         self.delete_messages(&[id]).await
@@ -531,8 +519,9 @@ impl TlqClient {
     /// # Errors
     ///
     /// * [`TlqError::Validation`] if the `ids` slice is empty
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn delete_messages(&self, ids: &[Uuid]) -> Result<String> {
         if ids.is_empty() {
@@ -540,7 +529,7 @@ impl TlqClient {
         }
 
         let request = DeleteMessagesRequest { ids: ids.to_vec() };
-        let response: String = self.request("/delete", &request).await?;
+        let response: String = self.post("/delete", &request).await?;
         Ok(response)
     }
 
@@ -579,8 +568,9 @@ impl TlqClient {
     ///
     /// # Errors
     ///
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn retry_message(&self, id: Uuid) -> Result<String> {
         self.retry_messages(&[id]).await
@@ -624,8 +614,9 @@ impl TlqClient {
     /// # Errors
     ///
     /// * [`TlqError::Validation`] if the `ids` slice is empty
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn retry_messages(&self, ids: &[Uuid]) -> Result<String> {
         if ids.is_empty() {
@@ -633,7 +624,7 @@ impl TlqClient {
         }
 
         let request = RetryMessagesRequest { ids: ids.to_vec() };
-        let response: String = self.request("/retry", &request).await?;
+        let response: String = self.post("/retry", &request).await?;
         Ok(response)
     }
 
@@ -665,11 +656,12 @@ impl TlqClient {
     ///
     /// # Errors
     ///
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection setup failures
+    /// * [`TlqError::Timeout`] if connecting exceeds the configured timeout
+    /// * [`TlqError::OutcomeUnknown`] if the request was sent but no valid response arrived
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn purge_queue(&self) -> Result<String> {
-        let response: String = self.request("/purge", &serde_json::json!({})).await?;
+        let response: String = self.post("/purge", &serde_json::json!({})).await?;
         Ok(response)
     }
 
@@ -701,11 +693,11 @@ impl TlqClient {
     ///
     /// # Errors
     ///
-    /// * [`TlqError::Connection`] for network connectivity issues
-    /// * [`TlqError::Timeout`] if the request times out
+    /// * [`TlqError::Connection`] for connection failures
+    /// * [`TlqError::Timeout`] if an attempt exceeds the configured timeout
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn stats(&self) -> Result<QueueStats> {
-        self.get_request("/stats").await
+        self.get("/stats").await
     }
 
     // Helper function to parse HTTP response - extracted for testing
@@ -730,7 +722,9 @@ impl TlqClient {
 
             Ok(body)
         } else {
-            Err(TlqError::Connection("Invalid HTTP response".to_string()))
+            Err(TlqError::Connection(
+                "Connection closed before a complete HTTP response".to_string(),
+            ))
         }
     }
 }
@@ -739,6 +733,63 @@ impl TlqClient {
 mod tests {
     use super::*;
     use crate::config::DEFAULT_MAX_MESSAGE_SIZE;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    // A port that was just released refuses connections immediately.
+    async fn closed_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn test_connection_failures_are_retried_with_backoff() {
+        let client = TlqClient::builder()
+            .host("127.0.0.1")
+            .port(closed_port().await)
+            .max_retries(2)
+            .retry_delay_ms(30)
+            .build();
+
+        for queue_changing in [false, true] {
+            let started = Instant::now();
+            let error = if queue_changing {
+                client.purge_queue().await.unwrap_err()
+            } else {
+                client.stats().await.unwrap_err()
+            };
+
+            assert!(matches!(error, TlqError::Connection(_)), "{error:?}");
+            assert!(error.is_retryable());
+            // Two retries: 30ms + 60ms of backoff.
+            assert!(started.elapsed() >= Duration::from_millis(90));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_serialization_failure_happens_before_connecting() {
+        struct InvalidBody;
+
+        impl Serialize for InvalidBody {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                _serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("invalid request"))
+            }
+        }
+
+        let client = TlqClient::builder()
+            .host("127.0.0.1")
+            .port(closed_port().await)
+            .build();
+        let error = client
+            .post::<_, String>("/add", &InvalidBody)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TlqError::Serialization(_)), "{error:?}");
+    }
 
     #[test]
     fn test_parse_http_response_success() {
@@ -786,7 +837,7 @@ mod tests {
         let result = TlqClient::parse_http_response(response);
         match result {
             Err(TlqError::Connection(msg)) => {
-                assert_eq!(msg, "Invalid HTTP response");
+                assert_eq!(msg, "Connection closed before a complete HTTP response");
             }
             _ => panic!("Expected connection error"),
         }
@@ -841,11 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn test_max_message_size_constant() {
-        assert_eq!(DEFAULT_MAX_MESSAGE_SIZE, 65536);
-    }
-
-    #[test]
     fn test_client_creation() {
         let client = TlqClient::new("test-host", 9999);
         assert!(client.is_ok());
@@ -871,24 +917,6 @@ mod tests {
         assert_eq!(client.config.timeout, Duration::from_secs(10));
     }
 
-    #[test]
-    fn test_message_size_validation() {
-        let _client = TlqClient::new("localhost", 1337).unwrap();
-
-        // Test exact limit
-        let message_at_limit = "x".repeat(DEFAULT_MAX_MESSAGE_SIZE);
-        let result = std::panic::catch_unwind(|| {
-            // We can't actually test async methods in sync tests without tokio,
-            // but we can verify the constant is correct
-            assert_eq!(message_at_limit.len(), DEFAULT_MAX_MESSAGE_SIZE);
-        });
-        assert!(result.is_ok());
-
-        // Test over limit
-        let message_over_limit = "x".repeat(DEFAULT_MAX_MESSAGE_SIZE + 1);
-        assert_eq!(message_over_limit.len(), DEFAULT_MAX_MESSAGE_SIZE + 1);
-    }
-
     #[tokio::test]
     async fn test_add_message_size_validation() {
         let client = TlqClient::new("localhost", 1337).unwrap();
@@ -898,8 +926,9 @@ mod tests {
         let result = client.add_message(large_message).await;
 
         match result {
-            Err(TlqError::MessageTooLarge { size }) => {
+            Err(TlqError::MessageTooLarge { size, limit }) => {
                 assert_eq!(size, DEFAULT_MAX_MESSAGE_SIZE + 1);
+                assert_eq!(limit, DEFAULT_MAX_MESSAGE_SIZE);
             }
             _ => panic!("Expected MessageTooLarge error"),
         }

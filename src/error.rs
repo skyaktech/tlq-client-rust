@@ -9,17 +9,17 @@ use thiserror::Error;
 ///
 /// # Error Categories
 ///
-/// **Retryable errors** (transient issues that may succeed on retry):
+/// **Retryable errors** (the request was not applied; retrying is safe):
 /// - [`Connection`](Self::Connection) - Network connectivity problems
 /// - [`Timeout`](Self::Timeout) - Request timeouts
 /// - [`Io`](Self::Io) - I/O errors from the underlying transport
 ///
-/// **Non-retryable errors** (permanent failures that won't succeed on retry):
+/// **Non-retryable errors** (should not be automatically retried):
 /// - [`Server`](Self::Server) - HTTP 4xx/5xx responses from the server
 /// - [`Validation`](Self::Validation) - Invalid request parameters
 /// - [`Serialization`](Self::Serialization) - JSON parsing errors
-/// - [`MaxRetriesExceeded`](Self::MaxRetriesExceeded) - Retry limit reached
 /// - [`MessageTooLarge`](Self::MessageTooLarge) - Message exceeds size limit
+/// - [`OutcomeUnknown`](Self::OutcomeUnknown) - Queue operation may already have been applied
 ///
 /// # Examples
 ///
@@ -32,8 +32,8 @@ use thiserror::Error;
 ///     
 ///     match client.add_message("test").await {
 ///         Ok(message) => println!("Success: {}", message.id),
-///         Err(TlqError::MessageTooLarge { size }) => {
-///             println!("Message too large: {} bytes", size);
+///         Err(TlqError::MessageTooLarge { size, limit }) => {
+///             println!("Message too large: {} bytes (max: {})", size, limit);
 ///         },
 ///         Err(TlqError::Connection(msg)) => {
 ///             println!("Connection failed: {}", msg);
@@ -86,39 +86,46 @@ pub enum TlqError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Maximum retry attempts exceeded
+    /// A queue-changing request was sent, but no valid response arrived.
     ///
-    /// The operation was retried the maximum number of times but still failed.
-    /// The retry count is configurable via [`ConfigBuilder`](crate::ConfigBuilder).
-    #[error("Max retries exceeded ({max_retries}) for operation")]
-    MaxRetriesExceeded { max_retries: u32 },
+    /// The server may already have applied the operation, so replaying it could
+    /// duplicate its effects. [`is_retryable`](Self::is_retryable) returns `false`
+    /// even when the cause is transient. Connection failures, which happen before
+    /// anything is sent, are returned directly instead.
+    #[error("Request outcome unknown (server may have applied it): {cause}")]
+    OutcomeUnknown {
+        /// The timeout, transport, or response-decoding failure behind this error.
+        cause: Box<TlqError>,
+    },
 
     /// Message size exceeds the configured client-side limit
     ///
     /// The default limit is 65,536 bytes (64 KiB), configurable through
     /// [`ConfigBuilder::max_message_size`](crate::ConfigBuilder::max_message_size).
     /// Larger messages are rejected before sending.
-    #[error("Message too large: {size} bytes (exceeds configured limit)")]
-    MessageTooLarge { size: usize },
+    #[error("Message too large: {size} bytes (max: {limit})")]
+    MessageTooLarge {
+        /// Actual message body size in UTF-8 bytes.
+        size: usize,
+        /// Configured maximum message body size in bytes.
+        limit: usize,
+    },
 }
 
 impl TlqError {
     /// Determines if this error type is retryable.
     ///
-    /// Returns `true` for transient errors that may succeed if retried:
+    /// Returns `true` for transient errors that are safe to retry:
     /// - [`Connection`](Self::Connection) errors
-    /// - [`Timeout`](Self::Timeout) errors  
+    /// - [`Timeout`](Self::Timeout) errors
     /// - [`Io`](Self::Io) errors
     ///
-    /// Returns `false` for permanent errors that won't succeed on retry:
+    /// Returns `false` for errors that should not be automatically retried:
     /// - [`Server`](Self::Server) errors (4xx/5xx HTTP responses)
     /// - [`Validation`](Self::Validation) errors
     /// - [`Serialization`](Self::Serialization) errors
-    /// - [`MaxRetriesExceeded`](Self::MaxRetriesExceeded) errors
     /// - [`MessageTooLarge`](Self::MessageTooLarge) errors
-    ///
-    /// This method is used internally by the retry mechanism to determine
-    /// whether to attempt retrying a failed operation.
+    /// - [`OutcomeUnknown`](Self::OutcomeUnknown) errors, regardless of the cause
     ///
     /// # Examples
     ///
@@ -191,6 +198,26 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_outcome_is_not_retryable_and_displays_cause() {
+        for cause in [
+            TlqError::Timeout(100),
+            TlqError::Io(ErrorKind::ConnectionReset.into()),
+            TlqError::Connection("closed".to_string()),
+            TlqError::Serialization(serde_json::from_str::<String>("not json").unwrap_err()),
+        ] {
+            let expected = cause.to_string();
+            let error = TlqError::OutcomeUnknown {
+                cause: Box::new(cause),
+            };
+            assert!(!error.is_retryable());
+            assert_eq!(
+                error.to_string(),
+                format!("Request outcome unknown (server may have applied it): {expected}")
+            );
+        }
+    }
+
+    #[test]
     fn test_server_error_not_retryable() {
         let error = TlqError::Server {
             status: 500,
@@ -223,24 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn test_max_retries_exceeded_not_retryable() {
-        let error = TlqError::MaxRetriesExceeded { max_retries: 3 };
-        assert!(!error.is_retryable());
-
-        let error_msg = format!("{}", error);
-        assert_eq!(error_msg, "Max retries exceeded (3) for operation");
-    }
-
-    #[test]
     fn test_message_too_large_not_retryable() {
-        let error = TlqError::MessageTooLarge { size: 70000 };
+        let error = TlqError::MessageTooLarge {
+            size: 70000,
+            limit: 65536,
+        };
         assert!(!error.is_retryable());
 
         let error_msg = format!("{}", error);
-        assert_eq!(
-            error_msg,
-            "Message too large: 70000 bytes (exceeds configured limit)"
-        );
+        assert_eq!(error_msg, "Message too large: 70000 bytes (max: 65536)");
     }
 
     #[test]
@@ -353,25 +371,26 @@ mod tests {
     #[test]
     fn test_message_size_edge_cases() {
         // Test various message sizes
-        let size_0 = TlqError::MessageTooLarge { size: 0 };
-        assert_eq!(
-            format!("{}", size_0),
-            "Message too large: 0 bytes (exceeds configured limit)"
-        );
+        let size_0 = TlqError::MessageTooLarge { size: 0, limit: 0 };
+        assert_eq!(format!("{}", size_0), "Message too large: 0 bytes (max: 0)");
 
-        let size_max = TlqError::MessageTooLarge { size: usize::MAX };
+        let size_max = TlqError::MessageTooLarge {
+            size: usize::MAX,
+            limit: usize::MAX - 1,
+        };
         assert_eq!(
             format!("{}", size_max),
             format!(
-                "Message too large: {} bytes (exceeds configured limit)",
-                usize::MAX
+                "Message too large: {} bytes (max: {})",
+                usize::MAX,
+                usize::MAX - 1
             )
         );
 
-        let size_just_over = TlqError::MessageTooLarge { size: 65537 };
+        let size_just_over = TlqError::MessageTooLarge { size: 5, limit: 4 };
         assert_eq!(
             format!("{}", size_just_over),
-            "Message too large: 65537 bytes (exceeds configured limit)"
+            "Message too large: 5 bytes (max: 4)"
         );
     }
 

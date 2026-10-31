@@ -25,8 +25,9 @@ async fn test_message_size_validation() {
     let result = client.add_message(large_message).await;
 
     match result {
-        Err(TlqError::MessageTooLarge { size }) => {
+        Err(TlqError::MessageTooLarge { size, limit }) => {
             assert_eq!(size, 100_000);
+            assert_eq!(limit, 65_536);
         }
         _ => panic!("Expected MessageTooLarge error"),
     }

@@ -1,11 +1,15 @@
+use crate::error::Result;
 use std::time::Duration;
 use tokio::time::sleep;
+
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Internal retry strategy with exponential backoff for TLQ client operations.
 ///
 /// This struct implements an exponential backoff retry mechanism that automatically
 /// retries failed operations up to a maximum number of attempts. The delay between
-/// retries doubles with each attempt: `base_delay × 2^attempt_number`.
+/// retries doubles with each attempt, capped at 30 seconds:
+/// `min(base_delay × 2^attempt_number, 30s)`.
 ///
 /// Used internally by [`TlqClient`](crate::TlqClient) to handle transient failures
 /// like network connectivity issues and timeouts.
@@ -28,15 +32,15 @@ impl RetryStrategy {
         }
     }
 
-    /// Executes an async operation with automatic retry on failure.
+    /// Executes an async operation with automatic retry on transient failure.
     ///
-    /// This method will execute the provided operation and retry it on failure
-    /// up to `max_retries` times. Between each retry attempt, it waits for an
-    /// exponentially increasing delay.
+    /// This method retries errors classified by [`TlqError::is_retryable`](crate::TlqError::is_retryable)
+    /// up to `max_retries` times. Other errors are returned immediately.
+    /// Between retries, it waits for an exponentially increasing delay.
     ///
     /// # Arguments
     ///
-    /// * `operation` - A closure that returns a Future yielding Result<T, E>
+    /// * `operation` - A closure that returns a Future yielding `Result<T, TlqError>`
     ///
     /// # Returns
     ///
@@ -48,22 +52,18 @@ impl RetryStrategy {
     /// - Attempt 1: Wait `base_delay × 2^0` = base_delay
     /// - Attempt 2: Wait `base_delay × 2^1` = base_delay × 2
     /// - Attempt 3: Wait `base_delay × 2^2` = base_delay × 4
-    /// - And so on...
-    pub async fn execute<F, Fut, T, E>(&self, mut operation: F) -> Result<T, E>
+    /// - Later delays are capped at 30 seconds, including when the base delay exceeds the cap.
+    pub async fn execute<F, Fut, T>(&self, mut operation: F) -> Result<T>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<T, E>>,
-        E: std::fmt::Debug,
+        Fut: std::future::Future<Output = Result<T>>,
     {
         let mut attempt = 0;
 
         loop {
             match operation().await {
                 Ok(result) => return Ok(result),
-                Err(err) if attempt >= self.max_retries => {
-                    return Err(err);
-                }
-                Err(_) if attempt < self.max_retries => {
+                Err(err) if err.is_retryable() && attempt < self.max_retries => {
                     let delay = self.calculate_delay(attempt);
                     sleep(delay).await;
                     attempt += 1;
@@ -75,7 +75,7 @@ impl RetryStrategy {
 
     /// Calculates the delay duration for a given retry attempt using exponential backoff.
     ///
-    /// The delay formula is: `base_delay × 2^attempt_number`
+    /// The delay formula is: `min(base_delay × 2^attempt_number, 30s)`.
     ///
     /// # Arguments
     ///
@@ -92,14 +92,25 @@ impl RetryStrategy {
     /// - Attempt 1: 100ms × 2^1 = 200ms  
     /// - Attempt 2: 100ms × 2^2 = 400ms
     fn calculate_delay(&self, attempt: u32) -> Duration {
-        let multiplier = 2_u32.pow(attempt);
-        self.base_delay * multiplier
+        if self.base_delay.is_zero() {
+            return Duration::ZERO;
+        }
+
+        let cap = MAX_RETRY_DELAY.as_nanos();
+        let nanos = 1_u128
+            .checked_shl(attempt)
+            .and_then(|multiplier| self.base_delay.as_nanos().checked_mul(multiplier))
+            .unwrap_or(cap)
+            .min(cap);
+        // The 30-second cap fits in u64 nanoseconds.
+        Duration::from_nanos(nanos as u64)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::TlqError;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use tokio::time::Instant;
@@ -119,9 +130,52 @@ mod tests {
     fn test_zero_base_delay() {
         let strategy = RetryStrategy::new(2, Duration::from_millis(0));
 
-        assert_eq!(strategy.calculate_delay(0), Duration::from_millis(0));
-        assert_eq!(strategy.calculate_delay(1), Duration::from_millis(0));
-        assert_eq!(strategy.calculate_delay(5), Duration::from_millis(0));
+        for attempt in [0, 1, 5, 32, 128, u32::MAX] {
+            assert_eq!(strategy.calculate_delay(attempt), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn test_backoff_caps_large_attempts_and_base_delays() {
+        let strategy = RetryStrategy::new(u32::MAX, Duration::from_secs(1));
+        assert_eq!(strategy.calculate_delay(4), Duration::from_secs(16));
+        for attempt in [5, 31, 32, 40, 128, u32::MAX] {
+            assert_eq!(strategy.calculate_delay(attempt), Duration::from_secs(30));
+        }
+
+        let strategy = RetryStrategy::new(u32::MAX, Duration::MAX);
+        for attempt in [0, 1, 32, 128, u32::MAX] {
+            assert_eq!(strategy.calculate_delay(attempt), Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn test_subsecond_backoff_does_not_cap_before_reaching_limit() {
+        let strategy = RetryStrategy::new(u32::MAX, Duration::from_nanos(1));
+        for attempt in [31, 32, 34] {
+            assert_eq!(
+                strategy.calculate_delay(attempt),
+                Duration::from_nanos(1_u64 << attempt)
+            );
+        }
+        assert_eq!(strategy.calculate_delay(35), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn test_more_than_32_retries_with_zero_delay() {
+        let strategy = RetryStrategy::new(40, Duration::ZERO);
+        let calls = AtomicU32::new(0);
+        let result = strategy
+            .execute(|| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err::<(), _>(TlqError::Connection(
+                    "unavailable".to_string(),
+                )))
+            })
+            .await;
+
+        assert!(matches!(result, Err(TlqError::Connection(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 41);
     }
 
     #[tokio::test]
@@ -135,12 +189,12 @@ mod tests {
                 let counter = call_count_clone.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    Ok::<&str, &str>("success")
+                    Ok("success")
                 }
             })
             .await;
 
-        assert_eq!(result, Ok("success"));
+        assert_eq!(result.unwrap(), "success");
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -155,17 +209,18 @@ mod tests {
                 let counter = call_count_clone.clone();
                 async move {
                     let count = counter.fetch_add(1, Ordering::SeqCst);
-                    if count < 2 {
-                        Err("temporary failure")
-                    } else {
-                        Ok("success after retries")
+                    match count {
+                        0 => Err(TlqError::Connection("temporary failure".to_string())),
+                        1 => Err(TlqError::Timeout(100)),
+                        2 => Err(TlqError::Io(std::io::ErrorKind::ConnectionReset.into())),
+                        _ => Ok("success after retries"),
                     }
                 }
             })
             .await;
 
-        assert_eq!(result, Ok("success after retries"));
-        assert_eq!(call_count.load(Ordering::SeqCst), 3); // Failed twice, succeeded on 3rd
+        assert_eq!(result.unwrap(), "success after retries");
+        assert_eq!(call_count.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
@@ -179,12 +234,12 @@ mod tests {
                 let counter = call_count_clone.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    Err::<&str, &str>("always fails")
+                    Err::<(), _>(TlqError::Connection("always fails".to_string()))
                 }
             })
             .await;
 
-        assert_eq!(result, Err("always fails"));
+        assert!(matches!(result, Err(TlqError::Connection(message)) if message == "always fails"));
         assert_eq!(call_count.load(Ordering::SeqCst), 3); // Initial attempt + 2 retries
     }
 
@@ -199,12 +254,14 @@ mod tests {
                 let counter = call_count_clone.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    Err::<&str, &str>("fails immediately")
+                    Err::<(), _>(TlqError::Connection("fails immediately".to_string()))
                 }
             })
             .await;
 
-        assert_eq!(result, Err("fails immediately"));
+        assert!(
+            matches!(result, Err(TlqError::Connection(message)) if message == "fails immediately")
+        );
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // Only initial attempt, no retries
     }
 
@@ -214,7 +271,7 @@ mod tests {
         let start_time = Instant::now();
 
         let result = strategy
-            .execute(|| async { Err::<&str, &str>("always fails") })
+            .execute(|| async { Err::<(), _>(TlqError::Timeout(100)) })
             .await;
 
         let elapsed = start_time.elapsed();
@@ -223,17 +280,11 @@ mod tests {
         // Add some tolerance for timing variations
         assert!(elapsed >= Duration::from_millis(140));
         assert!(elapsed < Duration::from_millis(200));
-        assert_eq!(result, Err("always fails"));
+        assert!(matches!(result, Err(TlqError::Timeout(100))));
     }
 
     #[tokio::test]
-    async fn test_retry_with_different_error_types() {
-        #[derive(Debug, PartialEq)]
-        enum TestError {
-            Recoverable,
-            Fatal,
-        }
-
+    async fn test_stops_retrying_after_non_retryable_error() {
         let strategy = RetryStrategy::new(3, Duration::from_millis(1));
         let call_count = Arc::new(AtomicU32::new(0));
 
@@ -244,8 +295,8 @@ mod tests {
                 async move {
                     let count = counter.fetch_add(1, Ordering::SeqCst);
                     match count {
-                        0 => Err(TestError::Recoverable),
-                        1 => Err(TestError::Fatal),
+                        0 => Err(TlqError::Connection("temporary failure".to_string())),
+                        1 => Err(TlqError::Validation("invalid request".to_string())),
                         2 => Ok("success on third attempt"),
                         _ => panic!("Should not reach more than 3 attempts"),
                     }
@@ -253,9 +304,9 @@ mod tests {
             })
             .await;
 
-        // The strategy should continue retrying through all error types
-        // and succeed on the third attempt
-        assert_eq!(result, Ok("success on third attempt"));
-        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        assert!(
+            matches!(result, Err(TlqError::Validation(message)) if message == "invalid request")
+        );
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 }
