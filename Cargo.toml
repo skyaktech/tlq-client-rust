@@ -1,6 +1,6 @@
 [package]
 name = "tlq-client"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["Nebojsa Jakovljevic <nebojsa@skyak.tech>"]
 description = "Rust client for TLQ (Tiny Little Queue) message queue server"

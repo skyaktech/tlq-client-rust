@@ -8,6 +8,8 @@ A high-performance, async Rust client for [TLQ (Tiny Little Queue)](https://gith
 - **Automatic retry** with exponential backoff
 - **Builder pattern** for flexible configuration
 - **Type-safe** message handling
+- **Server metadata** with version and uptime from TLQ 0.5.0
+- **Configurable message size limit** (64 KiB by default)
 - **Zero external dependencies** (only tokio, serde, uuid, thiserror)
 - **High performance** with minimal overhead
 - **Comprehensive documentation** with examples and API reference
@@ -69,9 +71,23 @@ let client = TlqClient::builder()
 
 - `host`: Server hostname (default: "localhost")
 - `port`: Server port (default: 1337)
-- `timeout`: Request timeout (default: 30 seconds)
-- `max_retries`: Maximum retry attempts (default: 3)
-- `retry_delay`: Base delay between retries (default: 100ms)
+- `timeout`: Timeout per request attempt, covering connect, write, and read (default: 30 seconds). Retry delays are additional.
+- `max_retries`: Maximum retries when connecting fails (default: 3)
+- `retry_delay`: Base delay between retries (default: 100ms); exponential backoff capped at 30 seconds
+- `max_message_size`: Maximum message body size in bytes (default: 65,536)
+
+For servers configured with `TLQ_MAX_MESSAGE_SIZE=128k`, set the matching client limit:
+
+```rust
+let client = tlq_client::TlqClient::builder()
+    .max_message_size(128 * 1024)
+    .build();
+```
+
+This controls client-side validation; the server enforces its own limit separately.
+Sizes count UTF-8 bytes, not characters. A zero limit permits only empty messages.
+
+When constructing `Config` directly, include `max_message_size` or use `..Config::default()`.
 
 ## Documentation
 
@@ -89,10 +105,26 @@ Key documentation highlights:
 ### Core Methods
 
 #### `health_check()`
-Check if the TLQ server is responsive.
+Check if the TLQ server is responsive. Returns `false` on an HTTP error response.
 
 ```rust
 let is_healthy = client.health_check().await?;
+```
+
+#### `server_info()`
+Retrieve the server greeting and optional metadata. TLQ 0.5.0 reports version and uptime;
+older servers returning `"Hello World"` yield `None` for both fields. Unrecognized metadata
+also yields `None`, while the original decoded greeting is preserved.
+
+```rust
+let info = client.server_info().await?;
+println!("{}", info.greeting);
+if let Some(version) = info.version {
+    println!("Server version: {}", version);
+}
+if let Some(uptime) = info.uptime {
+    println!("Uptime: {} seconds", uptime.as_secs());
+}
 ```
 
 #### `add_message(body)`
@@ -119,7 +151,7 @@ if let Some(message) = client.get_message().await? {
 ```
 
 #### `delete_message(id)` / `delete_messages(ids)`
-Delete processed messages from the queue.
+Delete processing messages from the queue. Returns `"Success"`; other IDs are ignored.
 
 ```rust
 // Delete single message
@@ -130,7 +162,7 @@ client.delete_messages(&[id1, id2, id3]).await?;
 ```
 
 #### `retry_message(id)` / `retry_messages(ids)`
-Return messages to the queue for retry.
+Return processing messages to the queue for retry. Returns `"Success"`.
 
 ```rust
 // Retry single message
@@ -149,10 +181,10 @@ println!("Ready: {}, Processing: {}, Dead: {}", stats.ready, stats.processing, s
 ```
 
 #### `purge_queue()`
-Remove all messages from the queue.
+Remove all messages from the queue. Returns `"Success"`.
 
 ```rust
-let purged_count = client.purge_queue().await?;
+let result = client.purge_queue().await?;
 ```
 
 ## Error Handling
@@ -166,18 +198,23 @@ match client.add_message("test").await {
     Ok(msg) => println!("Success: {}", msg.id),
     Err(TlqError::Connection(e)) => println!("Connection error: {}", e),
     Err(TlqError::Timeout(ms)) => println!("Timeout after {}ms", ms),
-    Err(TlqError::MessageTooLarge { size }) => println!("Message too large: {} bytes", size),
+    Err(TlqError::MessageTooLarge { size, limit }) => println!("Message too large: {} bytes (max: {})", size, limit),
+    Err(TlqError::OutcomeUnknown { cause }) => println!("Queue operation may have been applied: {}", cause),
     Err(e) => println!("Other error: {}", e),
 }
 ```
 
 ### Retryable Errors
 
-Some errors are automatically retried:
+The client retries failed connection attempts with exponential backoff (capped at
+30 seconds). A request that has been sent is never replayed, because the server may
+already have applied it. If a queue-changing request fails after being sent, the error
+is `OutcomeUnknown { cause }`, which is not retryable. HTTP error responses are
+returned as `Server` errors.
 
 ```rust
 if error.is_retryable() {
-    // Will be retried automatically
+    // The request was never applied; it is safe to send again.
 }
 ```
 

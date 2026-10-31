@@ -12,6 +12,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let info = client.server_info().await?;
+    println!("Server: {}", info.greeting);
+
     println!("\nChecking queue stats...");
     let stats = client.stats().await?;
     println!(

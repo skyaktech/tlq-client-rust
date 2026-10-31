@@ -36,7 +36,7 @@ pub struct Message {
 /// Messages transition through these states as they are processed:
 /// - `Ready` → `Processing` (when retrieved by a consumer)
 /// - `Processing` → `Ready` (when retried)
-/// - Any state → deleted (when explicitly deleted)
+/// - `Processing` → deleted (when explicitly deleted)
 ///
 /// Messages that exceed the server's max retry limit are automatically
 /// removed by the background reaper and counted as "dead" in queue statistics.

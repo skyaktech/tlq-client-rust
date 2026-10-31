@@ -1,6 +1,8 @@
 use crate::client::TlqClient;
 use std::time::Duration;
 
+pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: usize = 65_536;
+
 /// Configuration settings for TLQ client connections.
 ///
 /// This struct contains all the configurable parameters for connecting to and
@@ -13,6 +15,7 @@ use std::time::Duration;
 /// - `timeout`: 30 seconds
 /// - `max_retries`: 3
 /// - `retry_delay`: 100 milliseconds (base delay for exponential backoff)
+/// - `max_message_size`: 65,536 bytes (64 KiB)
 ///
 /// # Examples
 ///
@@ -39,12 +42,18 @@ pub struct Config {
     pub host: String,
     /// Port number of the TLQ server
     pub port: u16,
-    /// Maximum time to wait for a single request to complete
+    /// Maximum time for each request attempt, including connect, write, and read.
+    /// Retry delays are additional.
     pub timeout: Duration,
-    /// Maximum number of retry attempts for failed operations
+    /// Maximum retries when connecting fails. A sent request is never replayed.
     pub max_retries: u32,
-    /// Base delay between retry attempts (exponential backoff multiplier)
+    /// Base delay for exponential backoff. Actual retry delays are capped at 30 seconds.
     pub retry_delay: Duration,
+    /// Maximum message body size in bytes, checked before sending.
+    ///
+    /// Match this to the server's `TLQ_MAX_MESSAGE_SIZE` setting. This does not
+    /// configure the server. A limit of zero permits only empty messages.
+    pub max_message_size: usize,
 }
 
 impl Default for Config {
@@ -55,6 +64,7 @@ impl Default for Config {
             timeout: Duration::from_secs(30),
             max_retries: 3,
             retry_delay: Duration::from_millis(100),
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
     }
 }
@@ -148,7 +158,9 @@ impl ConfigBuilder {
         self
     }
 
-    /// Sets the request timeout duration.
+    /// Sets the timeout for each complete request attempt (connect, write, and read).
+    ///
+    /// Retry delays are additional.
     ///
     /// # Arguments
     ///
@@ -196,8 +208,8 @@ impl ConfigBuilder {
 
     /// Sets the maximum number of retry attempts.
     ///
-    /// When a retryable error occurs, the client will retry the operation
-    /// up to this many times before giving up.
+    /// Failed connection attempts are retried up to this many times with
+    /// exponential backoff. A request that has been sent is never replayed.
     ///
     /// # Arguments
     ///
@@ -221,7 +233,8 @@ impl ConfigBuilder {
     /// Sets the base retry delay duration.
     ///
     /// The actual delay between retries uses exponential backoff:
-    /// delay = base_delay × 2^attempt_number
+    /// delay = min(base_delay × 2^attempt_number, 30 seconds).
+    /// This cap also applies to base delays greater than 30 seconds.
     ///
     /// # Arguments
     ///
@@ -264,6 +277,27 @@ impl ConfigBuilder {
     /// ```
     pub fn retry_delay_ms(mut self, ms: u64) -> Self {
         self.config.retry_delay = Duration::from_millis(ms);
+        self
+    }
+
+    /// Sets the maximum message body size in bytes (default: 65,536).
+    ///
+    /// Match the server's `TLQ_MAX_MESSAGE_SIZE` setting to allow larger messages.
+    /// This is a client-side check; the server enforces its own limit separately.
+    /// A limit of zero permits only empty messages.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tlq_client::ConfigBuilder;
+    ///
+    /// let config = ConfigBuilder::new()
+    ///     .max_message_size(128 * 1024)
+    ///     .build_config();
+    /// assert_eq!(config.max_message_size, 131_072);
+    /// ```
+    pub fn max_message_size(mut self, bytes: usize) -> Self {
+        self.config.max_message_size = bytes;
         self
     }
 
