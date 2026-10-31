@@ -20,7 +20,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tlq-client = "0.4"
+tlq-client = "0.5"
 ```
 
 ## Quick Start
