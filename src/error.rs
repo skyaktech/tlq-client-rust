@@ -93,11 +93,12 @@ pub enum TlqError {
     #[error("Max retries exceeded ({max_retries}) for operation")]
     MaxRetriesExceeded { max_retries: u32 },
 
-    /// Message size exceeds the 64KB limit
+    /// Message size exceeds the configured client-side limit
     ///
-    /// TLQ enforces a maximum message size of 65,536 bytes (64KB).
-    /// Messages larger than this limit are rejected.
-    #[error("Message too large: {size} bytes (max: 65536)")]
+    /// The default limit is 65,536 bytes (64 KiB), configurable through
+    /// [`ConfigBuilder::max_message_size`](crate::ConfigBuilder::max_message_size).
+    /// Larger messages are rejected before sending.
+    #[error("Message too large: {size} bytes (exceeds configured limit)")]
     MessageTooLarge { size: usize },
 }
 
@@ -236,7 +237,10 @@ mod tests {
         assert!(!error.is_retryable());
 
         let error_msg = format!("{}", error);
-        assert_eq!(error_msg, "Message too large: 70000 bytes (max: 65536)");
+        assert_eq!(
+            error_msg,
+            "Message too large: 70000 bytes (exceeds configured limit)"
+        );
     }
 
     #[test]
@@ -352,19 +356,22 @@ mod tests {
         let size_0 = TlqError::MessageTooLarge { size: 0 };
         assert_eq!(
             format!("{}", size_0),
-            "Message too large: 0 bytes (max: 65536)"
+            "Message too large: 0 bytes (exceeds configured limit)"
         );
 
         let size_max = TlqError::MessageTooLarge { size: usize::MAX };
         assert_eq!(
             format!("{}", size_max),
-            format!("Message too large: {} bytes (max: 65536)", usize::MAX)
+            format!(
+                "Message too large: {} bytes (exceeds configured limit)",
+                usize::MAX
+            )
         );
 
         let size_just_over = TlqError::MessageTooLarge { size: 65537 };
         assert_eq!(
             format!("{}", size_just_over),
-            "Message too large: 65537 bytes (max: 65536)"
+            "Message too large: 65537 bytes (exceeds configured limit)"
         );
     }
 

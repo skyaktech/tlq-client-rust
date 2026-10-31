@@ -40,7 +40,8 @@
 //! - **Type safety** - Strong typing with `serde` for JSON serialization
 //! - **Builder pattern** - Flexible configuration with [`ConfigBuilder`]
 //! - **Error handling** - Comprehensive error types with retryable classification
-//! - **Message validation** - Enforces 64KB message size limit
+//! - **Message validation** - Configurable message size limit (64 KiB by default)
+//! - **Server metadata** - Version and uptime from TLQ 0.5.0 via [`ServerInfo`]
 //! - **UUID v7 IDs** - Time-ordered message identifiers
 //!
 //! ## Configuration
@@ -67,8 +68,10 @@ pub mod config;
 pub mod error;
 pub mod message;
 mod retry;
+pub mod server_info;
 
 pub use client::TlqClient;
 pub use config::{Config, ConfigBuilder};
 pub use error::{Result, TlqError};
 pub use message::{Message, MessageState, QueueStats};
+pub use server_info::ServerInfo;

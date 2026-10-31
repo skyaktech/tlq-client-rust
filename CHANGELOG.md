@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `server_info()` and `ServerInfo` with the original greeting, optional server version, and optional uptime as `Duration`
+- Support for TLQ 0.5.0 health metadata and legacy `"Hello World"` responses
+- `Config::max_message_size` and `ConfigBuilder::max_message_size(bytes)` for configurable client-side message limits (default: 65,536 bytes)
+- HTTP compatibility tests for health responses, errors, and message-size boundaries, including UTF-8 bodies
+
+### Changed
+- `Config` struct literals must include `max_message_size` or use `..Config::default()`
+- `MessageTooLarge` error text refers to the configured limit instead of a fixed 64 KiB limit
+- Corrected delete/retry/purge documentation to describe `"Success"` responses rather than affected-message counts
+
 ## [0.4.0] - 2026-03-21
 
 ### Added

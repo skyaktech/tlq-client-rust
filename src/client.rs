@@ -3,6 +3,7 @@ use crate::{
     error::{Result, TlqError},
     message::*,
     retry::RetryStrategy,
+    server_info::ServerInfo,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
@@ -10,8 +11,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use uuid::Uuid;
-
-const MAX_MESSAGE_SIZE: usize = 65536;
 
 /// The main client for interacting with TLQ (Tiny Little Queue) servers.
 ///
@@ -269,10 +268,43 @@ impl TlqClient {
         Ok(response_str.contains("200 OK"))
     }
 
+    /// Retrieves the server greeting, version, and uptime from `/hello`.
+    ///
+    /// TLQ 0.5.0 exposes version and uptime in its greeting. Older servers return
+    /// `"Hello World"`, with `version` and `uptime` set to `None`. Unrecognized
+    /// metadata is also left as `None`; the original greeting is always available.
+    /// Uses the client's configured timeout and retry settings.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tlq_client::TlqClient;
+    ///
+    /// # async fn example() -> Result<(), tlq_client::TlqError> {
+    /// let client = TlqClient::new("localhost", 1337)?;
+    /// let info = client.server_info().await?;
+    /// println!("{}", info.greeting);
+    /// if let Some(uptime) = info.uptime {
+    ///     println!("Uptime: {} seconds", uptime.as_secs());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns network errors, [`TlqError::Server`] for HTTP 4xx/5xx responses,
+    /// or [`TlqError::Serialization`] if the response is not a JSON string.
+    pub async fn server_info(&self) -> Result<ServerInfo> {
+        let greeting = self.get_request("/hello").await?;
+        Ok(ServerInfo::from_greeting(greeting))
+    }
+
     /// Adds a new message to the TLQ server.
     ///
     /// The message will be assigned a UUID v7 identifier and placed in the queue
-    /// with state [`MessageState::Ready`]. Messages have a maximum size limit of 64KB.
+    /// with state [`MessageState::Ready`]. The client checks the configured message
+    /// size limit (65,536 bytes by default) before sending.
     ///
     /// # Arguments
     ///
@@ -305,14 +337,14 @@ impl TlqClient {
     ///
     /// # Errors
     ///
-    /// * [`TlqError::MessageTooLarge`] if the message exceeds 64KB (65,536 bytes)
+    /// * [`TlqError::MessageTooLarge`] if the message exceeds the configured byte limit
     /// * [`TlqError::Connection`] for network connectivity issues
     /// * [`TlqError::Timeout`] if the request times out
     /// * [`TlqError::Server`] for server-side errors (4xx/5xx HTTP responses)
     pub async fn add_message(&self, body: impl Into<String>) -> Result<Message> {
         let body = body.into();
 
-        if body.len() > MAX_MESSAGE_SIZE {
+        if body.len() > self.config.max_message_size {
             return Err(TlqError::MessageTooLarge { size: body.len() });
         }
 
@@ -434,7 +466,7 @@ impl TlqClient {
     ///
     /// # Returns
     ///
-    /// Returns a string indicating the result of the operation (typically "Success" or a count).
+    /// Returns `"Success"` on completion. The server does not return an affected-message count.
     ///
     /// # Examples
     ///
@@ -466,7 +498,7 @@ impl TlqClient {
     /// Deletes multiple messages from the TLQ server.
     ///
     /// This method removes the specified messages from the queue permanently.
-    /// Messages can be in any state when deleted.
+    /// Only messages in [`MessageState::Processing`] are deleted; other IDs are ignored.
     ///
     /// # Arguments
     ///
@@ -474,7 +506,7 @@ impl TlqClient {
     ///
     /// # Returns
     ///
-    /// Returns a string indicating the number of messages deleted or "Success".
+    /// Returns `"Success"` on completion. The server does not return an affected-message count.
     ///
     /// # Examples
     ///
@@ -489,7 +521,7 @@ impl TlqClient {
     ///     if !messages.is_empty() {
     ///         let ids: Vec<_> = messages.iter().map(|m| m.id).collect();
     ///         let result = client.delete_messages(&ids).await?;
-    ///         println!("Deleted {} messages", result);
+    ///         println!("Delete result: {}", result);
     ///     }
     ///     
     ///     Ok(())
@@ -706,6 +738,7 @@ impl TlqClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_MAX_MESSAGE_SIZE;
 
     #[test]
     fn test_parse_http_response_success() {
@@ -809,7 +842,7 @@ mod tests {
 
     #[test]
     fn test_max_message_size_constant() {
-        assert_eq!(MAX_MESSAGE_SIZE, 65536);
+        assert_eq!(DEFAULT_MAX_MESSAGE_SIZE, 65536);
     }
 
     #[test]
@@ -829,6 +862,7 @@ mod tests {
             timeout: Duration::from_secs(10),
             max_retries: 5,
             retry_delay: Duration::from_millis(200),
+            ..Config::default()
         };
 
         let client = TlqClient::with_config(config);
@@ -842,17 +876,17 @@ mod tests {
         let _client = TlqClient::new("localhost", 1337).unwrap();
 
         // Test exact limit
-        let message_at_limit = "x".repeat(MAX_MESSAGE_SIZE);
+        let message_at_limit = "x".repeat(DEFAULT_MAX_MESSAGE_SIZE);
         let result = std::panic::catch_unwind(|| {
             // We can't actually test async methods in sync tests without tokio,
             // but we can verify the constant is correct
-            assert_eq!(message_at_limit.len(), MAX_MESSAGE_SIZE);
+            assert_eq!(message_at_limit.len(), DEFAULT_MAX_MESSAGE_SIZE);
         });
         assert!(result.is_ok());
 
         // Test over limit
-        let message_over_limit = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        assert_eq!(message_over_limit.len(), MAX_MESSAGE_SIZE + 1);
+        let message_over_limit = "x".repeat(DEFAULT_MAX_MESSAGE_SIZE + 1);
+        assert_eq!(message_over_limit.len(), DEFAULT_MAX_MESSAGE_SIZE + 1);
     }
 
     #[tokio::test]
@@ -860,12 +894,12 @@ mod tests {
         let client = TlqClient::new("localhost", 1337).unwrap();
 
         // Test message at exact size limit (should be rejected because it's over the limit)
-        let large_message = "x".repeat(MAX_MESSAGE_SIZE + 1);
+        let large_message = "x".repeat(DEFAULT_MAX_MESSAGE_SIZE + 1);
         let result = client.add_message(large_message).await;
 
         match result {
             Err(TlqError::MessageTooLarge { size }) => {
-                assert_eq!(size, MAX_MESSAGE_SIZE + 1);
+                assert_eq!(size, DEFAULT_MAX_MESSAGE_SIZE + 1);
             }
             _ => panic!("Expected MessageTooLarge error"),
         }
@@ -873,12 +907,12 @@ mod tests {
         // Test empty message (should be valid)
         let empty_message = "";
         // We can't actually test without a server, but we can verify it passes size validation
-        assert!(empty_message.len() <= MAX_MESSAGE_SIZE);
+        assert!(empty_message.len() <= DEFAULT_MAX_MESSAGE_SIZE);
 
         // Test message exactly at limit (should be valid)
-        let max_message = "x".repeat(MAX_MESSAGE_SIZE);
+        let max_message = "x".repeat(DEFAULT_MAX_MESSAGE_SIZE);
         // Size check should pass
-        assert_eq!(max_message.len(), MAX_MESSAGE_SIZE);
+        assert_eq!(max_message.len(), DEFAULT_MAX_MESSAGE_SIZE);
     }
 
     #[tokio::test]
